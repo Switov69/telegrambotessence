@@ -311,6 +311,42 @@ def get_banned_users():
         logger.error(f"Ошибка получения списка банов: {e}")
         return []
 
+def get_all_chat_users():
+    """Получает ВСЕХ пользователей, которые взаимодействовали с ботом"""
+    try:
+        all_users = set()
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Из таблицы users
+        cursor.execute('SELECT DISTINCT user_id FROM users WHERE user_id IS NOT NULL AND user_id > 0')
+        for row in cursor.fetchall():
+            all_users.add(row[0])
+        
+        # 2. Из таблицы suggestions
+        cursor.execute('SELECT DISTINCT user_id FROM suggestions WHERE user_id IS NOT NULL AND user_id > 0')
+        for row in cursor.fetchall():
+            all_users.add(row[0])
+        
+        # 3. Из таблицы bans
+        cursor.execute('SELECT DISTINCT user_id FROM bans WHERE user_id IS NOT NULL AND user_id > 0')
+        for row in cursor.fetchall():
+            all_users.add(row[0])
+        
+        conn.close()
+        
+        # Преобразуем в список и сортируем
+        result = list(all_users)
+        result.sort()
+        
+        logger.info(f"📊 Для рассылки найдено {len(result)} пользователей")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения всех пользователей: {e}")
+        return []
+
 def ban_user(user_id, username, first_name, reason, banned_by):
     """Банит пользователя"""
     try:
@@ -1898,6 +1934,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====== КОМАНДА /BROADCAST ======
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начинает режим рассылки"""
     try:
         user_id = update.effective_user.id
         username = update.effective_user.username
@@ -1909,15 +1946,19 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         log_admin_action(user_id, username, "broadcast_started")
         
+        # Получаем количество пользователей
+        users_count = len(get_all_chat_users())
+        
         await update.message.reply_text(
-            "📢 <b>Режим рассылки</b>\n\n"
-            "Отправьте сообщение для рассылки всем пользователям.\n"
-            "Можно отправить:\n"
-            "• Текст\n"
-            "• Фото с текстом\n"
-            "• Видео с текстом\n"
-            "• Документы\n\n"
-            "Для отмены отправьте /cancel",
+            f"📢 <b>Режим рассылки</b>\n\n"
+            f"📊 Всего пользователей для рассылки: <code>{users_count}</code>\n\n"
+            f"<b>Отправьте сообщение для рассылки всем пользователям.</b>\n"
+            f"Можно отправить:\n"
+            f"• Текст\n"
+            f"• Фото с текстом\n"
+            f"• Видео с текстом\n"
+            f"• Документы\n\n"
+            f"<b>Для отмены отправьте /cancel</b>",
             parse_mode='HTML'
         )
         
@@ -1928,6 +1969,7 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет рассылку всем пользователям"""
     try:
         user_id = update.effective_user.id
         username = update.effective_user.username
@@ -1954,7 +1996,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         success_count = 0
         fail_count = 0
-        blocked_count = 0  # Пользователи, заблокировавшие бота
+        blocked_count = 0
         
         # Отправляем статус
         status_msg = await update.message.reply_text(
@@ -2000,8 +2042,8 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     success_count += 1
                 
-                # Обновляем статус каждые 10 сообщений или каждые 5 секунд
-                if i % 10 == 0:
+                # Обновляем статус каждые 10 сообщений
+                if i % 10 == 0 and i > 0:
                     try:
                         await status_msg.edit_text(
                             f"📢 <b>Рассылка в процессе...</b>\n\n"
@@ -2015,19 +2057,16 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 
-                # Небольшая задержка, чтобы не перегружать сервер
-                await asyncio.sleep(0.1)
+                # Небольшая задержка
+                await asyncio.sleep(0.05)
                 
             except Forbidden:
                 # Пользователь заблокировал бота
                 blocked_count += 1
-                logger.warning(f"Пользователь {user} заблокировал бота")
                 
             except BadRequest as e:
                 if "Chat not found" in str(e) or "user not found" in str(e):
-                    # Пользователь не найден или удалил чат
                     fail_count += 1
-                    logger.warning(f"Пользователь {user} не найден: {e}")
                 else:
                     fail_count += 1
                     logger.error(f"Ошибка при отправке пользователю {user}: {e}")
@@ -2050,7 +2089,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• ✅ Успешно отправлено: <code>{success_count}</code>\n"
             f"• 🚫 Заблокировали бота: <code>{blocked_count}</code>\n"
             f"• ❌ Ошибок отправки: <code>{fail_count}</code>\n"
-            f"• 👤 Отправитель исключен из рассылки",
+            f"• 👤 Вы исключены из рассылки",
             parse_mode='HTML'
         )
         
@@ -2059,6 +2098,18 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка рассылки: {e}")
         context.user_data['waiting_broadcast'] = False
+        return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет рассылку"""
+    try:
+        if 'waiting_broadcast' in context.user_data:
+            context.user_data['waiting_broadcast'] = False
+        
+        await update.message.reply_text("❌ Рассылка отменена")
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Ошибка отмены рассылки: {e}")
         return ConversationHandler.END
 
 # ====== ОБРАБОТЧИК НЕИЗВЕСТНЫХ КОМАНД ======
@@ -2265,5 +2316,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
