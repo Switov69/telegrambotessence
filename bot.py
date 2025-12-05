@@ -2052,45 +2052,12 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка в обработчике ошибок: {e}")
 
-# ====== НАСТРОЙКА КОМАНД ======
-async def set_bot_commands_simple():
-    """Простая настройка команд бота без использования Application"""
-    try:
-        # Команды для всех пользователей
-        user_commands = [
-            BotCommand("start", "Запустить бота"),
-        ]
-        
-        # Создаем временный бот для настройки команд
-        from telegram import Bot
-        bot = Bot(token=BOT_TOKEN)
-        await bot.set_my_commands(user_commands)
-        await bot.close()
-        
-        logger.info("✅ Команды бота настроены")
-    except Exception as e:
-        logger.warning(f"Не удалось настроить команды бота: {e}")
-
 # ====== ЗАПУСК ======
-def main():
-    # Проверяем наличие других экземпляров (только для предупреждения)
-    has_other_instance = check_running_instances()
-    
-    import atexit
-    atexit.register(cleanup_lock_file)
-    
+async def main_async():
+    """Асинхронная главная функция"""
     try:
         init_db()
         
-        # Создаем и запускаем event loop для настройки команд
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(set_bot_commands_simple())
-        
-        # Закрываем loop после использования
-        loop.close()
-        
-        # Теперь создаем и запускаем основное приложение
         application = Application.builder().token(BOT_TOKEN).build()
         
         application.add_error_handler(error_handler)
@@ -2160,11 +2127,10 @@ def main():
         # Обработчики кнопок (модерация и другие)
         application.add_handler(CallbackQueryHandler(button_handler))
         
+        # Убираем настройку команд через JobQueue - это не критично
+        
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
-        if has_other_instance:
-            print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
-            print("   Это может вызвать конфликты при обработке сообщений!")
         print("=" * 60)
         print("🔧 ОСНОВНЫЕ ФУНКЦИИ:")
         print("   ✅ Модерация предложений (фото/видео + текст)")
@@ -2207,13 +2173,35 @@ def main():
         print("💡 Для остановки бота нажмите Ctrl+C")
         print("=" * 60)
         
-        application.run_polling(
+        # Запускаем polling
+        await application.run_polling(
             poll_interval=1.0,
             timeout=20,
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES
         )
         
+    except Exception as e:
+        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        raise e
+
+def main():
+    # Проверяем наличие других экземпляров (только для предупреждения)
+    has_other_instance = check_running_instances()
+    
+    import atexit
+    atexit.register(cleanup_lock_file)
+    
+    try:
+        if has_other_instance:
+            print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
+            print("   Это может вызвать конфликты при обработке сообщений!")
+        
+        # Запускаем асинхронную главную функцию
+        asyncio.run(main_async())
+        
+    except KeyboardInterrupt:
+        print("\n\n✅ Бот остановлен пользователем (Ctrl+C)")
     except Exception as e:
         logger.error(f"Критическая ошибка при запуске бота: {e}")
         print(f"❌ Бот остановлен из-за ошибки: {e}")
