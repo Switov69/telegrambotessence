@@ -239,16 +239,36 @@ def get_admins():
         return []
 
 def get_all_users():
-    """Получает всех пользователей для рассылки"""
+    """Получает ВСЕХ пользователей, которые когда-либо писали боту"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT user_id FROM users WHERE user_id IS NOT NULL')
-        users = [row[0] for row in cursor.fetchall()]
+        
+        # 1. Получаем всех пользователей из таблицы users
+        cursor.execute('SELECT DISTINCT user_id FROM users WHERE user_id IS NOT NULL AND user_id > 0')
+        users_from_db = [row[0] for row in cursor.fetchall()]
+        
+        # 2. Получаем всех уникальных авторов предложений
+        cursor.execute('SELECT DISTINCT user_id FROM suggestions WHERE user_id IS NOT NULL AND user_id > 0')
+        suggestion_authors = [row[0] for row in cursor.fetchall()]
+        
+        # 3. Получаем всех забаненных пользователей (тоже могли писать)
+        cursor.execute('SELECT DISTINCT user_id FROM bans WHERE user_id IS NOT NULL AND user_id > 0')
+        banned_users = [row[0] for row in cursor.fetchall()]
+        
         conn.close()
-        return users
+        
+        # Объединяем все ID, убираем дубли и сортируем
+        all_users = set(users_from_db + suggestion_authors + banned_users)
+        
+        # Убираем None и отрицательные ID (каналы/группы)
+        all_users = [user_id for user_id in all_users if user_id and user_id > 0]
+        
+        logger.info(f"📊 Для рассылки найдено {len(all_users)} пользователей")
+        return all_users
+        
     except Exception as e:
-        logger.error(f"Ошибка получения списка пользователей: {e}")
+        logger.error(f"Ошибка получения списка пользователей для рассылки: {e}")
         return []
 
 # ====== ФУНКЦИИ ДЛЯ БАНОВ ======
@@ -1916,81 +1936,129 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['waiting_broadcast'] = False
             return ConversationHandler.END
         
+        # Получаем всех пользователей
         users = get_all_users()
-        success_count = 0
-        fail_count = 0
         
         if not users:
             await update.message.reply_text("❌ Нет пользователей для рассылки")
             context.user_data['waiting_broadcast'] = False
             return ConversationHandler.END
         
+        # Убираем отправителя из рассылки
+        users_to_send = [user for user in users if user != user_id]
+        
+        if not users_to_send:
+            await update.message.reply_text("❌ Нет других пользователей для рассылки (кроме вас)")
+            context.user_data['waiting_broadcast'] = False
+            return ConversationHandler.END
+        
+        success_count = 0
+        fail_count = 0
+        blocked_count = 0  # Пользователи, заблокировавшие бота
+        
+        # Отправляем статус
         status_msg = await update.message.reply_text(
             f"📢 <b>Начинаю рассылку...</b>\n\n"
-            f"Всего пользователей: <code>{len(users)}</code>\n"
-            f"Отправитель (вы) исключен из рассылки.",
+            f"📊 <b>Статистика:</b>\n"
+            f"• Всего пользователей: <code>{len(users)}</code>\n"
+            f"• Для рассылки: <code>{len(users_to_send)}</code> (вы исключены)\n"
+            f"• Отправка началась...",
             parse_mode='HTML'
         )
         
-        for user in users:
-            # Исключаем отправителя из рассылки
-            if user == user_id:
-                continue
-                
+        # Отправляем сообщение
+        for i, user in enumerate(users_to_send):
             try:
                 if update.message.text:
                     await context.bot.send_message(chat_id=user, text=update.message.text)
+                    success_count += 1
+                    
                 elif update.message.photo:
                     await context.bot.send_photo(
                         chat_id=user,
                         photo=update.message.photo[-1].file_id,
-                        caption=update.message.caption
+                        caption=update.message.caption,
+                        parse_mode='HTML' if update.message.caption_html else None
                     )
+                    success_count += 1
+                    
                 elif update.message.video:
                     await context.bot.send_video(
                         chat_id=user,
                         video=update.message.video.file_id,
-                        caption=update.message.caption
+                        caption=update.message.caption,
+                        parse_mode='HTML' if update.message.caption_html else None
                     )
+                    success_count += 1
+                    
                 elif update.message.document:
                     await context.bot.send_document(
                         chat_id=user,
                         document=update.message.document.file_id,
-                        caption=update.message.caption
+                        caption=update.message.caption,
+                        parse_mode='HTML' if update.message.caption_html else None
                     )
-                success_count += 1
-                await asyncio.sleep(0.05)
+                    success_count += 1
+                
+                # Обновляем статус каждые 10 сообщений или каждые 5 секунд
+                if i % 10 == 0:
+                    try:
+                        await status_msg.edit_text(
+                            f"📢 <b>Рассылка в процессе...</b>\n\n"
+                            f"📊 <b>Прогресс:</b>\n"
+                            f"• Отправлено: <code>{i+1}/{len(users_to_send)}</code>\n"
+                            f"• ✅ Успешно: <code>{success_count}</code>\n"
+                            f"• ❌ Ошибок: <code>{fail_count}</code>\n"
+                            f"• 🚫 Заблокировали: <code>{blocked_count}</code>",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
+                
+                # Небольшая задержка, чтобы не перегружать сервер
+                await asyncio.sleep(0.1)
+                
+            except Forbidden:
+                # Пользователь заблокировал бота
+                blocked_count += 1
+                logger.warning(f"Пользователь {user} заблокировал бота")
+                
+            except BadRequest as e:
+                if "Chat not found" in str(e) or "user not found" in str(e):
+                    # Пользователь не найден или удалил чат
+                    fail_count += 1
+                    logger.warning(f"Пользователь {user} не найден: {e}")
+                else:
+                    fail_count += 1
+                    logger.error(f"Ошибка при отправке пользователю {user}: {e}")
+                    
             except Exception as e:
                 fail_count += 1
-                logger.warning(f"Не удалось отправить пользователю {user}: {e}")
+                logger.error(f"Ошибка при отправке пользователю {user}: {e}")
         
         log_admin_action(user_id, username, "broadcast_completed", 
-                        details=f"success: {success_count}, failed: {fail_count}")
+                        details=f"success: {success_count}, failed: {fail_count}, blocked: {blocked_count}")
         
         context.user_data['waiting_broadcast'] = False
         
+        # Финальный отчет
         await status_msg.edit_text(
             f"✅ <b>Рассылка завершена!</b>\n\n"
-            f"📊 Статистика:\n"
-            f"✅ Успешно: <code>{success_count}</code>\n"
-            f"❌ Ошибок: <code>{fail_count}</code>\n"
-            f"👤 Отправитель исключен из рассылки.",
+            f"📊 <b>Итоговая статистика:</b>\n"
+            f"• Всего пользователей: <code>{len(users)}</code>\n"
+            f"• Для рассылки: <code>{len(users_to_send)}</code>\n"
+            f"• ✅ Успешно отправлено: <code>{success_count}</code>\n"
+            f"• 🚫 Заблокировали бота: <code>{blocked_count}</code>\n"
+            f"• ❌ Ошибок отправки: <code>{fail_count}</code>\n"
+            f"• 👤 Отправитель исключен из рассылки",
             parse_mode='HTML'
         )
         
         return ConversationHandler.END
+        
     except Exception as e:
         logger.error(f"Ошибка рассылки: {e}")
         context.user_data['waiting_broadcast'] = False
-        return ConversationHandler.END
-
-async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['waiting_broadcast'] = False
-        await update.message.reply_text("❌ Рассылка отменена")
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Ошибка отмены рассылки: {e}")
         return ConversationHandler.END
 
 # ====== ОБРАБОТЧИК НЕИЗВЕСТНЫХ КОМАНД ======
@@ -2197,3 +2265,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
