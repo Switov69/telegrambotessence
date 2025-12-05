@@ -2075,7 +2075,8 @@ def main():
                     CommandHandler("cancel", broadcast_cancel)
                 ]
             },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)]
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False  # Устанавливаем явно False для PTB 22.5
         )
         
         # Conversation handler для добавления администратора
@@ -2086,7 +2087,8 @@ def main():
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin)
                 ]
             },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)]
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False  # Устанавливаем явно False для PTB 22.5
         )
         
         # Conversation handler для удаления администратора
@@ -2097,7 +2099,8 @@ def main():
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin)
                 ]
             },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)]
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False  # Устанавливаем явно False для PTB 22.5
         )
         
         application.add_handler(broadcast_handler)
@@ -2128,8 +2131,30 @@ def main():
         # Обработчики кнопок (модерация и другие)
         application.add_handler(CallbackQueryHandler(button_handler))
         
-        # Настройка меню команд
-        application.job_queue.run_once(lambda context: setup_commands(application), when=1)
+        # Устанавливаем команды бота (без использования JobQueue)
+        try:
+            # Создаем асинхронную задачу для установки команд
+            async def setup_commands_on_startup():
+                try:
+                    # Устанавливаем базовые команды для всех пользователей
+                    user_commands = [
+                        BotCommand("start", "Запустить бота"),
+                    ]
+                    
+                    await application.bot.set_my_commands(user_commands)
+                    logger.info("✅ Команды бота настроены")
+                except Exception as e:
+                    logger.warning(f"Не удалось настроить команды бота: {e}")
+            
+            # Запускаем однократно при старте
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(setup_commands_on_startup())
+            loop.close()
+            
+        except Exception as e:
+            logger.warning(f"Не удалось настроить команды бота: {e}")
         
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
@@ -2137,7 +2162,6 @@ def main():
             print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
             print("   Это может вызвать конфликты при обработке сообщений!")
         print("=" * 60)
-        print("")
         print("📝 МЕНЮ КОМАНД:")
         print("   Для всех пользователей: только /start")
         print("   Команды админов (вводятся вручную):")
@@ -2177,4 +2201,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
