@@ -1937,7 +1937,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         
         # Получаем всех пользователей
-        users = get_all_users()
+        users = get_all_chat_users()
         
         if not users:
             await update.message.reply_text("❌ Нет пользователей для рассылки")
@@ -2265,4 +2265,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
