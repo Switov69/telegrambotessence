@@ -201,6 +201,7 @@ def init_db():
 
 # ====== ПРОВЕРКА ПРАВ ======
 def get_user_role(user_id):
+    """Получает роль пользователя из базы данных"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -217,7 +218,9 @@ def is_admin(user_id):
     return role in ["admin", "main_admin"]
 
 def is_main_admin(user_id):
-    return get_user_role(user_id) == "main_admin"
+    """Проверяет, является ли пользователь главным админом"""
+    role = get_user_role(user_id)
+    return role == "main_admin"
 
 def get_admins():
     """Получает список админов"""
@@ -1866,26 +1869,34 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Проверяем наличие колонки channel_message_id
+        try:
+            cursor.execute("SELECT channel_message_id FROM suggestions LIMIT 1")
+            has_channel_message_id = True
+        except sqlite3.OperationalError:
+            has_channel_message_id = False
+            logger.warning("⚠️ Колонка channel_message_id не существует в таблице suggestions")
+        
         if reply_msg.photo:
             caption = reply_msg.caption or ""
             if "Предложение от" in caption:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text LIKE ?', 
+                cursor.execute('SELECT id, status FROM suggestions WHERE message_text LIKE ?', 
                               (f"%{caption.split('Предложение от')[-1].strip()}%",))
             else:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
+                cursor.execute('SELECT id, status FROM suggestions WHERE message_text = ?', 
                               (caption,))
         elif reply_msg.video:
             caption = reply_msg.caption or ""
-            cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
+            cursor.execute('SELECT id, status FROM suggestions WHERE message_text = ?', 
                           (caption,))
         else:
             text = reply_msg.text or ""
             if "Одобрить предложение от" in text:
                 username_part = text.split("Одобрить предложение от")[-1].split("?")[0].strip()
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE username = ? OR first_name = ?', 
+                cursor.execute('SELECT id, status FROM suggestions WHERE username = ? OR first_name = ?', 
                               (username_part.replace('@', ''), username_part))
             else:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
+                cursor.execute('SELECT id, status FROM suggestions WHERE message_text = ?', 
                               (text,))
         
         suggestion_data = cursor.fetchone()
@@ -1896,7 +1907,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             return
         
-        suggestion_id, channel_message_id, status = suggestion_data
+        suggestion_id, status = suggestion_data
         
         if status != 'approved':
             log_admin_action(user_id, username, "hidden_delete_not_approved", f"suggestion_id: {suggestion_id}")
@@ -1904,10 +1915,30 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             return
         
-        if not channel_message_id:
-            await update.message.reply_text("❌ ID сообщения в канале не найден")
+        # Если колонки channel_message_id нет, пытаемся получить ID другим способом
+        if not has_channel_message_id:
+            await update.message.reply_text(
+                "⚠️ <b>Внимание!</b>\n\n"
+                "Колонка channel_message_id не существует в базе данных.\n"
+                "Для правильной работы команды /delete:\n"
+                "1. Остановите бота (Ctrl+C)\n"
+                "2. Удалите файл suggestions.db\n"
+                "3. Запустите бота заново",
+                parse_mode='HTML'
+            )
             conn.close()
             return
+        
+        # Получаем channel_message_id если колонка существует
+        cursor.execute('SELECT channel_message_id FROM suggestions WHERE id = ?', (suggestion_id,))
+        channel_message_data = cursor.fetchone()
+        
+        if not channel_message_data or not channel_message_data[0]:
+            await update.message.reply_text("❌ ID сообщения в канале не найден в базе данных")
+            conn.close()
+            return
+        
+        channel_message_id = channel_message_data[0]
         
         try:
             await context.bot.delete_message(chat_id=CHANNEL_CHAT_ID, message_id=channel_message_id)
@@ -1919,7 +1950,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ <b>Пост удален с канала!</b>\n\n"
                 f"📋 ID предложения: <code>{suggestion_id}</code>\n"
-                f"🗑️ Статус изменен на: <code>deleted</code>",
+                f"🗑️ Статус изменен на: <code>deleted</code>\n"
+                f"📝 ID в канале: <code>{channel_message_id}</code>",
                 parse_mode='HTML'
             )
             
@@ -2316,6 +2348,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
