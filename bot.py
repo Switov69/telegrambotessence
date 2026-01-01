@@ -3270,6 +3270,7 @@ def main():
     try:
         init_db()
         
+        # Создаем Application с включенным JobQueue
         application = Application.builder().token(BOT_TOKEN).build()
         
         # Проверяем истекшие баны при запуске
@@ -3282,27 +3283,32 @@ def main():
         if sent_count > 0:
             logger.info(f"При запуске отправлено {sent_count} уведомлений о разбане")
         
-        # Добавляем задачу для периодической проверки банов
-        async def check_bans_periodically(context):
-            """Периодически проверяет истекшие баны"""
-            try:
-                expired_count = check_expired_bans()
-                if expired_count > 0:
-                    logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
-                
-                sent_count, failed_count = send_pending_unban_notifications(application)
-                if sent_count > 0:
-                    logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
-                
-            except Exception as e:
-                logger.error(f"Ошибка в периодической проверке банов: {e}")
-        
-        # Запускаем периодическую задачу
-        application.job_queue.run_repeating(
-            callback=check_bans_periodically,
-            interval=300,  # 5 минут
-            first=10  # Запустить через 10 секунд после старта
-        )
+        # ПРОВЕРЯЕМ наличие JobQueue перед запуском периодической задачи
+        if hasattr(application, 'job_queue') and application.job_queue is not None:
+            # Добавляем задачу для периодической проверки банов
+            async def check_bans_periodically(context):
+                """Периодически проверяет истекшие баны"""
+                try:
+                    expired_count = check_expired_bans()
+                    if expired_count > 0:
+                        logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
+                    
+                    sent_count, failed_count = send_pending_unban_notifications(application)
+                    if sent_count > 0:
+                        logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка в периодической проверке банов: {e}")
+            
+            # Запускаем периодическую задачу
+            application.job_queue.run_repeating(
+                callback=check_bans_periodically,
+                interval=300,  # 5 минут
+                first=10  # Запустить через 10 секунд после старта
+            )
+            logger.info("✅ JobQueue настроен для периодической проверки банов")
+        else:
+            logger.warning("⚠️ JobQueue не доступен. Периодические задачи не будут выполняться.")
         
         application.add_error_handler(error_handler)
         
@@ -3417,6 +3423,3 @@ def main():
         print(f"❌ Бот остановлен из-за ошибки: {e}")
     finally:
         cleanup_lock_file()
-
-if __name__ == '__main__':
-    main()
