@@ -3283,27 +3283,38 @@ def main():
         if expired_count > 0:
             logger.info(f"При запуске удалено {expired_count} истекших временных банов")
         
-        # Отправляем ожидающие уведомления при запуске
-        sent_count, failed_count = send_pending_unban_notifications(application)
-        if sent_count > 0:
-            logger.info(f"При запуске отправлено {sent_count} уведомлений о разбане")
+        # ТЕСТОВАЯ ПРОВЕРКА ПОДКЛЮЧЕНИЯ (синхронная)
+        try:
+            bot_info = application.bot.get_me()
+            logger.info(f"✅ Бот подключен к Telegram API: @{bot_info.username}")
+            print(f"✅ Бот подключен: @{bot_info.username}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к Telegram API: {e}")
+            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Telegram API")
+            print(f"Причина: {e}")
+            return
         
         # Периодическая проверка банов (если JobQueue доступен)
         if hasattr(application, 'job_queue') and application.job_queue is not None:
-            async def check_bans_periodically(context):
+            from telegram.ext import JobQueue
+            
+            def check_bans_periodically(context):
                 """Периодически проверяет истекшие баны"""
                 try:
                     expired_count = check_expired_bans()
                     if expired_count > 0:
                         logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
                     
-                    sent_count, failed_count = send_pending_unban_notifications(application)
-                    if sent_count > 0:
-                        logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
+                    # Получаем application из context
+                    if context and context.application:
+                        sent_count, failed_count = send_pending_unban_notifications(context.application)
+                        if sent_count > 0:
+                            logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
                     
                 except Exception as e:
                     logger.error(f"Ошибка в периодической проверке банов: {e}")
             
+            # Используем run_repeating правильно
             application.job_queue.run_repeating(
                 callback=check_bans_periodically,
                 interval=300,
@@ -3398,20 +3409,19 @@ def main():
         print("🤖 Бот запущен и готов к работе!")
         print(f"🤖 Token: {BOT_TOKEN[:10]}...")
         print(f"🤖 Admin ID: {ADMIN_CHAT_ID}")
+        print(f"🤖 Имя бота: @{bot_info.username}")
         if has_other_instance:
             print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
         print("=" * 60)
+        print("📝 Ожидаю сообщений...")
         
-        # Запускаем бота с подробными логами
+        # Запускаем бота
         logger.info("🔄 Запуск polling...")
         
-        # Устанавливаем более высокий timeout и включим все обновления
+        # Простой запуск polling
         application.run_polling(
-            poll_interval=0.5,  # Более частое опрос
-            timeout=30,
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            close_loop=False
+            allowed_updates=Update.ALL_TYPES
         )
         
     except KeyboardInterrupt:
@@ -3421,3 +3431,6 @@ def main():
         print(f"❌ Бот остановлен из-за ошибки: {e}")
     finally:
         cleanup_lock_file()
+
+if __name__ == "__main__":
+    main()
