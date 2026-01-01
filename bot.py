@@ -118,21 +118,6 @@ def log_ban_action(admin_id: int, admin_username: str, action: str, target_user_
     logger.info(log_message)
 
 # ====== БАЗА ДАННЫХ ======
-def get_db_connection():
-    """Создает соединение с базой данных с повторными попытками при блокировке"""
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect('suggestions.db', check_same_thread=False, timeout=10)
-            return conn
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(0.1)
-                continue
-            else:
-                logger.error(f"Ошибка подключения к БД: {e}")
-                raise e
-
 def init_db():
     try:
         conn = get_db_connection()
@@ -179,6 +164,26 @@ def init_db():
                 ban_duration TEXT
             )
         ''')
+        
+        # Проверяем и добавляем отсутствующие колонки
+        try:
+            cursor.execute("PRAGMA table_info(bans)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            # Добавляем отсутствующие колонки
+            if 'ban_until' not in columns:
+                cursor.execute('ALTER TABLE bans ADD COLUMN ban_until DATETIME')
+                logger.info("✅ Добавлена колонка ban_until в таблицу bans")
+            
+            if 'ban_duration' not in columns:
+                cursor.execute('ALTER TABLE bans ADD COLUMN ban_duration TEXT')
+                logger.info("✅ Добавлена колонка ban_duration в таблицу bans")
+            
+            if 'ban_type' not in columns:
+                cursor.execute('ALTER TABLE bans ADD COLUMN ban_type TEXT DEFAULT "permanent"')
+                logger.info("✅ Добавлена колонка ban_type в таблицу bans")
+        except Exception as e:
+            logger.warning(f"Ошибка проверки структуры таблицы bans: {e}")
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS delete_requests (
