@@ -77,8 +77,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Включаем DEBUG для telegram.ext чтобы видеть все события
+logging.getLogger("telegram.ext").setLevel(logging.INFO)
+logging.getLogger("telegram").setLevel(logging.INFO)
+
+# Убираем лишние логи
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 # ====== ФУНКЦИИ ЛОГИРОВАНИЯ ======
 def log_user_action(user_id: int, username: str, action: str, details: str = ""):
@@ -3270,6 +3275,7 @@ def main():
     try:
         init_db()
         
+        # Создаем Application с правильной конфигурацией
         application = Application.builder().token(BOT_TOKEN).build()
         
         # Проверяем истекшие баны при запуске
@@ -3282,72 +3288,34 @@ def main():
         if sent_count > 0:
             logger.info(f"При запуске отправлено {sent_count} уведомлений о разбане")
         
-        # Добавляем задачу для периодической проверки банов
-        async def check_bans_periodically(context):
-            """Периодически проверяет истекшие баны"""
-            try:
-                expired_count = check_expired_bans()
-                if expired_count > 0:
-                    logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
-                
-                sent_count, failed_count = send_pending_unban_notifications(application)
-                if sent_count > 0:
-                    logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
-                
-            except Exception as e:
-                logger.error(f"Ошибка в периодической проверке банов: {e}")
-        
-        # Запускаем периодическую задачу
-        application.job_queue.run_repeating(
-            callback=check_bans_periodically,
-            interval=300,  # 5 минут
-            first=10  # Запустить через 10 секунд после старта
-        )
+        # Периодическая проверка банов (если JobQueue доступен)
+        if hasattr(application, 'job_queue') and application.job_queue is not None:
+            async def check_bans_periodically(context):
+                """Периодически проверяет истекшие баны"""
+                try:
+                    expired_count = check_expired_bans()
+                    if expired_count > 0:
+                        logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
+                    
+                    sent_count, failed_count = send_pending_unban_notifications(application)
+                    if sent_count > 0:
+                        logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка в периодической проверке банов: {e}")
+            
+            application.job_queue.run_repeating(
+                callback=check_bans_periodically,
+                interval=300,
+                first=10
+            )
+            logger.info("✅ JobQueue настроен для периодической проверки банов")
         
         application.add_error_handler(error_handler)
         
-        # Conversation handler для рассылки
-        broadcast_handler = ConversationHandler(
-            entry_points=[CommandHandler("broadcast", broadcast_start)],
-            states={
-                WAITING_BROADCAST: [
-                    MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, broadcast_message),
-                    CommandHandler("cancel", broadcast_cancel)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
-        )
+        # Обработчики в правильном порядке (от самых специфичных к общим)
         
-        # Conversation handler для добавления администратора
-        add_admin_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern='^add_admin$')],
-            states={
-                WAITING_ADD_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
-        )
-        
-        # Conversation handler для удаления администратора
-        remove_admin_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern='^remove_admin$')],
-            states={
-                WAITING_REMOVE_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
-        )
-        
-        application.add_handler(broadcast_handler)
-        application.add_handler(add_admin_handler)
-        application.add_handler(remove_admin_handler)
-        
-        # Команды
+        # 1. Обработчики команд
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("stats", show_statistics))
         application.add_handler(CommandHandler("admins", admins_list))
@@ -3359,64 +3327,97 @@ def main():
         application.add_handler(CommandHandler("untempban", untempban_command))
         application.add_handler(CommandHandler("tempbans", tempbans_command))
         
-        # Обработчик неизвестных команд (должен быть ПОСЛЕ всех известных команд)
-        application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+        # 2. ConversationHandler для рассылки
+        broadcast_handler = ConversationHandler(
+            entry_points=[CommandHandler("broadcast", broadcast_start)],
+            states={
+                WAITING_BROADCAST: [
+                    MessageHandler(
+                        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+                        broadcast_message
+                    ),
+                    CommandHandler("cancel", broadcast_cancel)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False
+        )
+        application.add_handler(broadcast_handler)
         
-        # Обработчики кнопок клавиатуры
-        application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|🗑️ Запрос на удаление|💬 Чат)$'), handle_keyboard_buttons))
+        # 3. ConversationHandler для добавления администратора
+        add_admin_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern='^add_admin$')],
+            states={
+                WAITING_ADD_ADMIN: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False
+        )
+        application.add_handler(add_admin_handler)
         
-        # Обработчики медиа и текстовых сообщений
-        # Важно: этот обработчик должен быть после обработчиков кнопок
-        application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.TEXT, handle_user_message))
+        # 4. ConversationHandler для удаления администратора
+        remove_admin_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern='^remove_admin$')],
+            states={
+                WAITING_REMOVE_ADMIN: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
+            per_message=False
+        )
+        application.add_handler(remove_admin_handler)
         
-        # Обработчики кнопок (модерация и другие)
+        # 5. Обработчики кнопок клавиатуры
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|🗑️ Запрос на удаление|💬 Чат)$'),
+            handle_keyboard_buttons
+        ))
+        
+        # 6. Обработчики кнопок (callback queries)
         application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # 7. Обработчики медиа сообщений (должен быть ПОСЛЕ текстовых, чтобы не перехватывал)
+        application.add_handler(MessageHandler(
+            filters.PHOTO | filters.VIDEO, 
+            handle_user_message
+        ))
+        
+        # 8. Обработчик текстовых сообщений (не команд)
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            handle_user_message
+        ))
+        
+        # 9. Обработчик неизвестных команд (последний)
+        application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
         
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
+        print(f"🤖 Token: {BOT_TOKEN[:10]}...")
+        print(f"🤖 Admin ID: {ADMIN_CHAT_ID}")
         if has_other_instance:
             print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
-            print("   Это может вызвать конфликты при обработке сообщений!")
-        print("=" * 60)
-        print("📝 МЕНЮ КОМАНД:")
-        print("   Для всех пользователей: только /start")
-        print("   Команды админов (вводятся вручную):")
-        print("   /stats - статистика")
-        print("   /admins - список команды")
-        print("   /approve - одобрить (ответ на сообщение)")
-        print("   /delete - удалить с канала (ответ на сообщение)")
-        print("   /ban - заблокировать пользователя навсегда")
-        print("   /unban - разблокировать пользователя")
-        print("   /tempban - временно заблокировать пользователя")
-        print("   /untempban - снять временную блокировку")
-        print("   /tempbans - список временных банов")
-        print("   /broadcast - рассылка сообщений")
-        print("=" * 60)
-        print("📱 МЕНЮ КНОПОК:")
-        print("   Для всех пользователей:")
-        print("   📋 Правила - правила публикации")
-        print("   📨 Отправить пост - отправить пост на модерацию")
-        print("   🗑️ Запрос на удаление - запросить удаление поста (просто отправьте пост из канала)")
-        print("   💬 Чат - ссылка на чат канала")
-        print("   Для админов дополнительно:")
-        print("   📊 Статистика - статистика бота")
         print("=" * 60)
         
-        # Простой запуск
+        # Запускаем бота с подробными логами
+        logger.info("🔄 Запуск polling...")
+        
+        # Устанавливаем более высокий timeout и включим все обновления
         application.run_polling(
-            poll_interval=1.0,
-            timeout=20,
+            poll_interval=0.5,  # Более частое опрос
+            timeout=30,
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
         )
         
     except KeyboardInterrupt:
         print("\n\n✅ Бот остановлен пользователем (Ctrl+C)")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         print(f"❌ Бот остановлен из-за ошибки: {e}")
     finally:
         cleanup_lock_file()
-
-if __name__ == '__main__':
-    main()
