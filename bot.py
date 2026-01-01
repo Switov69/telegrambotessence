@@ -11,9 +11,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from telegram.error import NetworkError, TimedOut, BadRequest, Forbidden, Conflict
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = "8407380994:AAE5L1D0w2fzrlEYaiiIV3WvuSLtiThV9CY"
+BOT_TOKEN = "8418277065:AAHsRqkGYoqZH2gI68yKRNe-Dp731Qxs4Js"
 ADMIN_CHAT_ID = 1746547600  # Ваш chat_id
-CHANNEL_CHAT_ID = "-1003401999609"  # ID вашего канала
+CHANNEL_CHAT_ID = "-1002556198303"  # ID вашего канала
 CHAT_LINK = "https://t.me/+1Es8MH54mf0wNzVi"  # Ссылка на чат
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"  # Ссылка на переходник
 PREDLOZHKA_LINK = "https://t.me/SushnostiNovikabot"  # Ссылка на бота предложки
