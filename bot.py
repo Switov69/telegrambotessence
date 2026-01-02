@@ -507,12 +507,26 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif update.message and update.message.text:
             # Проверяем, не является ли это кнопкой клавиатуры
             text = update.message.text
-            if not (text.startswith("📊") or text.startswith("📋") or text.startswith("📨") or 
-                   text.startswith("💬") or text.startswith("🗑️")):
-                # Если это не кнопка и не команда - это обычный текст
-                if not update.message.text.startswith('/'):
-                    log_user_action(user_id, username, "text_only_rejection", "пользователь отправил только текст")
-                    await update.message.reply_text("❌ Нужно отправить фотографии или видео с текстом.\n\nТолько текст не принимается.")
+            keyboard_buttons = ["📊 Статистика", "📋 Правила", "📨 Отправить пост", "🗑️ Запрос на удаление", "💬 Чат"]
+            
+            if text in keyboard_buttons:
+                # Это кнопка клавиатуры - она обрабатывается другим хендлером
+                return
+            
+            # Проверяем, не является ли это командой
+            if update.message.text.startswith('/'):
+                # Это команда - обрабатывается другим хендлером
+                return
+            
+            # Если это обычный текст (не кнопка, не команда)
+            log_user_action(user_id, username, "text_only_rejection", "пользователь отправил только текст")
+            
+            # Отправляем сообщение пользователю
+            await update.message.reply_text(
+                "❌ Нужно отправить фотографии или видео с текстом.\n\n"
+                "Только текст не принимается.\n\n"
+            )
+            
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
