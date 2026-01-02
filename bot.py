@@ -11,7 +11,7 @@ from telegram.error import NetworkError, TimedOut, BadRequest, Forbidden, Confli
 from datetime import datetime
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = "8418277065:AAHsRqkGYoqZH2gI68yKRNe-Dp731Qxs4Js"
+BOT_TOKEN = "8418277065:AAHeHD9ikbkJ1xMq_EOD-dbf2LMnEb7yAyA"
 ADMIN_CHAT_ID = 8069781607  # Ваш chat_id
 CHANNEL_CHAT_ID = "-1002556198303"  # ID вашего канала
 CHAT_LINK = "https://t.me/+1Es8MH54mf0wNzVi"  # Ссылка на чат
