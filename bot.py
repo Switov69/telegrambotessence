@@ -5,10 +5,10 @@ import asyncio
 import sys
 import os
 import html
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from telegram.error import NetworkError, TimedOut, BadRequest, Forbidden, Conflict
-from datetime import datetime
 
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = "8418277065:AAHeHD9ikbkJ1xMq_EOD-dbf2LMnEb7yAyA"
@@ -23,61 +23,20 @@ WAITING_BROADCAST = 1
 WAITING_ADD_ADMIN = 2
 WAITING_REMOVE_ADMIN = 3
 
-# ====== ПРОВЕРКА ЗАПУЩЕННЫХ ЭКЗЕМПЛЯРОВ ======
-def check_running_instances():
-    """Проверяет, есть ли другие запущенные экземпляры бота (только предупреждение)"""
-    try:
-        lock_file = "bot.lock"
-        if os.path.exists(lock_file):
-            with open(lock_file, 'r') as f:
-                pid = f.read().strip()
-            try:
-                if os.name != 'nt':
-                    os.kill(int(pid), 0)
-                print("=" * 60)
-                print("⚠️  ВНИМАНИЕ: Обнаружен другой запущенный экземпляр бота!")
-                print(f"📌 PID другого процесса: {pid}")
-                print("💡 РЕКОМЕНДАЦИЯ:")
-                print("   Рекомендуется остановить все экземпляры кроме одного")
-                print("   во избежание конфликтов и дублирования сообщений.")
-                print("=" * 60)
-                return True
-            except:
-                # Процесс не существует, удаляем старый lock файл
-                os.remove(lock_file)
-                return False
-        
-        # Создаем новый lock файл
-        with open(lock_file, 'w') as f:
-            f.write(str(os.getpid()))
-        return False
-    except Exception as e:
-        logger.warning(f"Ошибка при проверке запущенных экземпляров: {e}")
-        return False
-
-def cleanup_lock_file():
-    """Удаляет lock-файл при завершении работы"""
-    try:
-        lock_file = "bot.lock"
-        if os.path.exists(lock_file):
-            # Проверяем, что удаляем только свой lock файл
-            with open(lock_file, 'r') as f:
-                pid = f.read().strip()
-            if pid == str(os.getpid()):
-                os.remove(lock_file)
-                logger.info("✅ Lock файл удален")
-    except:
-        pass
-
 # ====== НАСТРОЙКА ЛОГИРОВАНИЯ ======
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
+# Убираем лишние логи
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 # ====== ФУНКЦИИ ЛОГИРОВАНИЯ ======
 def log_user_action(user_id: int, username: str, action: str, details: str = ""):
@@ -118,19 +77,13 @@ def log_ban_action(admin_id: int, admin_username: str, action: str, target_user_
 
 # ====== БАЗА ДАННЫХ ======
 def get_db_connection():
-    """Создает соединение с базой данных с повторными попытками при блокировке"""
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect('suggestions.db', check_same_thread=False, timeout=10)
-            return conn
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(0.1)
-                continue
-            else:
-                logger.error(f"Ошибка подключения к БД: {e}")
-                raise e
+    """Создает соединение с базой данных"""
+    try:
+        conn = sqlite3.connect('suggestions.db', check_same_thread=False, timeout=10)
+        return conn
+    except Exception as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        raise e
 
 def init_db():
     try:
@@ -176,36 +129,22 @@ def init_db():
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS delete_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                first_name TEXT,
+                channel_message_id INTEGER,
+                comment TEXT,
+                status TEXT DEFAULT 'pending',
+                processed_by INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         cursor.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, role) VALUES (?, ?, ?, ?)',
                       (ADMIN_CHAT_ID, "svitbandit", "Главный администратор", "main_admin"))
-        
-        # Добавляем колонку video_id если она не существует
-        try:
-            cursor.execute("SELECT video_id FROM suggestions LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE suggestions ADD COLUMN video_id TEXT")
-            logger.info("✅ Добавлена колонка video_id в таблицу suggestions")
-        
-        # Добавляем колонку file_type если она не существует
-        try:
-            cursor.execute("SELECT file_type FROM suggestions LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE suggestions ADD COLUMN file_type TEXT DEFAULT 'photo'")
-            logger.info("✅ Добавлена колонка file_type в таблицу suggestions")
-        
-        # Добавляем колонку moderated_by если она не существует
-        try:
-            cursor.execute("SELECT moderated_by FROM suggestions LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE suggestions ADD COLUMN moderated_by INTEGER")
-            logger.info("✅ Добавлена колонка moderated_by в таблицу suggestions")
-        
-        # Добавляем колонку channel_message_id если она не существует
-        try:
-            cursor.execute("SELECT channel_message_id FROM suggestions LIMIT 1")
-        except sqlite3.OperationalError:
-            cursor.execute("ALTER TABLE suggestions ADD COLUMN channel_message_id INTEGER")
-            logger.info("✅ Добавлена колонка channel_message_id в таблицу suggestions")
         
         conn.commit()
         conn.close()
@@ -213,8 +152,120 @@ def init_db():
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
 
+def find_suggestion_by_text(message_text: str):
+    """Находит предложение в базе по тексту"""
+    try:
+        if not message_text or len(message_text.strip()) < 5:
+            return None
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        clean_text = message_text.strip()
+        
+        # Поиск по точному совпадению
+        cursor.execute('''
+            SELECT id, channel_message_id, status FROM suggestions 
+            WHERE message_text LIKE ? AND status = 'approved'
+            LIMIT 1
+        ''', (f"%{clean_text[:100]}%",))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            suggestion_id, channel_message_id, status = result
+            logger.info(f"Найдено предложение в базе: ID={suggestion_id}, channel_msg_id={channel_message_id}")
+            return result
+        
+        logger.info(f"Предложение не найдено по тексту: '{message_text[:50]}...'")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Ошибка поиска предложения по тексту: {e}")
+        return None
+
+# ====== ФУНКЦИИ ДЛЯ БАНОВ ======
+def get_banned_users():
+    """Получает список забаненных пользователей"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM bans ORDER BY banned_at DESC')
+        banned_users = cursor.fetchall()
+        conn.close()
+        return banned_users
+    except Exception as e:
+        logger.error(f"Ошибка получения забаненных пользователей: {e}")
+        return []
+
+def get_ban_info(user_id):
+    """Получает информацию о бане пользователя"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM bans WHERE user_id = ?', (user_id,))
+        ban_info = cursor.fetchone()
+        conn.close()
+        return ban_info
+    except Exception as e:
+        logger.error(f"Ошибка получения информации о бане пользователя {user_id}: {e}")
+        return None
+
+def ban_user(user_id, username, first_name, reason, banned_by):
+    """Блокирует пользователя"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM bans WHERE user_id = ?', (user_id,))
+        
+        cursor.execute('''
+            INSERT INTO bans (user_id, username, first_name, reason, banned_by)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, reason, banned_by))
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Пользователь {user_id} заблокирован")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка блокировки пользователя {user_id}: {e}")
+        return False
+
+def unban_user(user_id):
+    """Разблокирует пользователя"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM bans WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Пользователь {user_id} разблокирован")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка разблокировки пользователя {user_id}: {e}")
+        return False
+
+def is_banned(user_id):
+    """Проверяет, забанен ли пользователь"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM bans WHERE user_id = ?', (user_id,))
+        ban_info = cursor.fetchone()
+        conn.close()
+        
+        return ban_info is not None
+    except Exception as e:
+        logger.error(f"Ошибка проверки бана для пользователя {user_id}: {e}")
+        return False
+
 # ====== ПРОВЕРКА ПРАВ ======
 def get_user_role(user_id):
+    """Получает роль пользователя из базы данных"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -231,7 +282,9 @@ def is_admin(user_id):
     return role in ["admin", "main_admin"]
 
 def is_main_admin(user_id):
-    return get_user_role(user_id) == "main_admin"
+    """Проверяет, является ли пользователь главным админом"""
+    role = get_user_role(user_id)
+    return role == "main_admin"
 
 def get_admins():
     """Получает список админов"""
@@ -253,135 +306,45 @@ def get_admins():
         return []
 
 def get_all_users():
-    """Получает всех пользователей для рассылки"""
+    """Получает ВСЕХ пользователей"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT DISTINCT user_id FROM users WHERE user_id IS NOT NULL')
-        users = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return users
-    except Exception as e:
-        logger.error(f"Ошибка получения списка пользователей: {e}")
-        return []
-
-# ====== ФУНКЦИЯ ДЛЯ РАССЫЛКИ ВСЕМ ПОЛЬЗОВАТЕЛЯМ ======
-def get_all_chat_users():
-    """Получает ВСЕХ пользователей, которые взаимодействовали с ботом"""
-    try:
-        all_users = set()
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 1. Из таблицы users
         cursor.execute('SELECT DISTINCT user_id FROM users WHERE user_id IS NOT NULL AND user_id > 0')
-        for row in cursor.fetchall():
-            all_users.add(row[0])
+        users_from_db = [row[0] for row in cursor.fetchall()]
         
-        # 2. Из таблицу suggestions
         cursor.execute('SELECT DISTINCT user_id FROM suggestions WHERE user_id IS NOT NULL AND user_id > 0')
-        for row in cursor.fetchall():
-            all_users.add(row[0])
+        suggestion_authors = [row[0] for row in cursor.fetchall()]
         
-        # 3. Из таблицы bans
         cursor.execute('SELECT DISTINCT user_id FROM bans WHERE user_id IS NOT NULL AND user_id > 0')
-        for row in cursor.fetchall():
-            all_users.add(row[0])
+        banned_users = [row[0] for row in cursor.fetchall()]
         
         conn.close()
         
-        # Преобразуем в список и сортируем
-        result = list(all_users)
-        result.sort()
+        all_users = set(users_from_db + suggestion_authors + banned_users)
+        all_users = [user_id for user_id in all_users if user_id and user_id > 0]
         
-        logger.info(f"📊 Для рассылки найдено {len(result)} пользователей")
-        return result
+        logger.info(f"📊 Для рассылки найдено {len(all_users)} пользователей")
+        return all_users
         
     except Exception as e:
-        logger.error(f"Ошибка получения всех пользователей: {e}")
+        logger.error(f"Ошибка получения списка пользователей для рассылки: {e}")
         return []
-
-# ====== ФУНКЦИИ ДЛЯ БАНОВ ======
-def is_banned(user_id):
-    """Проверяет, забанен ли пользователь"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT 1 FROM bans WHERE user_id = ?', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result is not None
-    except Exception as e:
-        logger.error(f"Ошибка проверки бана для пользователя {user_id}: {e}")
-        return False
-
-def get_ban_info(user_id):
-    """Получает информацию о бане пользователя"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM bans WHERE user_id = ?', (user_id,))
-        ban_info = cursor.fetchone()
-        conn.close()
-        return ban_info
-    except Exception as e:
-        logger.error(f"Ошибка получения информации о бане {user_id}: {e}")
-        return None
-
-def get_banned_users():
-    """Получает список забаненных пользователей"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id, username, first_name, reason, banned_by, banned_at FROM bans ORDER BY banned_at DESC')
-        banned_users = cursor.fetchall()
-        conn.close()
-        return banned_users
-    except Exception as e:
-        logger.error(f"Ошибка получения списка банов: {e}")
-        return []
-
-def ban_user(user_id, username, first_name, reason, banned_by):
-    """Банит пользователя"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO bans (user_id, username, first_name, reason, banned_by)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, username, first_name, reason, banned_by))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка бана пользователя {user_id}: {e}")
-        return False
-
-def unban_user(user_id):
-    """Разбанивает пользователя"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM bans WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка разбана пользователя {user_id}: {e}")
-        return False
 
 # ====== КЛАВИАТУРА МЕНЮ ======
 def get_main_keyboard(user_id):
-    """Возвращает основную клавиатуру в зависимости от роли пользователя"""
+    """Возвращает основную клавиатуру"""
     if is_admin(user_id):
         keyboard = [
             [KeyboardButton("📊 Статистика"), KeyboardButton("📋 Правила")],
-            [KeyboardButton("📨 Отправить пост"), KeyboardButton("💬 Чат")]
+            [KeyboardButton("📨 Отправить пост"), KeyboardButton("🗑️ Запрос на удаление")],
+            [KeyboardButton("💬 Чат")]
         ]
     else:
         keyboard = [
             [KeyboardButton("📋 Правила"), KeyboardButton("📨 Отправить пост")],
+            [KeyboardButton("🗑️ Запрос на удаление")],
             [KeyboardButton("💬 Чат")]
         ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -392,31 +355,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         username = update.effective_user.username
         first_name = update.effective_user.first_name
-        
-        # Получаем роль пользователя
         role = get_user_role(user_id)
         
-        # Сохраняем/обновляем информацию о пользователе
+        # Сохраняем информацию о пользователе
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (user_id,))
-        exists = cursor.fetchone()
-        
-        if exists:
-            # Обновляем информацию, если что-то изменилось
-            cursor.execute('''
-                UPDATE users 
-                SET username = ?, first_name = ?, added_date = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            ''', (username, first_name, user_id))
-        else:
-            # Добавляем нового пользователя
-            cursor.execute('''
-                INSERT INTO users (user_id, username, first_name, role, added_date)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ''', (user_id, username, first_name, 'user'))
-        
+        cursor.execute('INSERT OR IGNORE INTO users (user_id, username, first_name, role) VALUES (?, ?, ?, ?)',
+                      (user_id, username, first_name, 'user'))
         conn.commit()
         conn.close()
         
@@ -424,7 +369,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Приветственное сообщение
         if role in ["main_admin", "admin"]:
-            welcome_text = f"""🎯 <b>Добро пожаловать, {first_name or 'Администратор'}!</b>
+            welcome_text = f"""🎯 <b>Добро пожаловать, {first_name}!</b>
 
 Вы вошли как администратор.
 
@@ -432,13 +377,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💡 По всем вопросам: @markizuw"""
         else:
-            welcome_text = f"""🎯 <b>Привет, {first_name or 'Пользователь'}!</b>
+            welcome_text = f"""🎯 <b>Привет, {first_name}!</b>
 
 Добро пожаловать в бота для публикации постов в канале.
 
 Используйте меню ниже для навигации."""
         
-        # Отправляем сообщение с клавиатурой
         reply_markup = get_main_keyboard(user_id)
         await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
     except Exception as e:
@@ -451,6 +395,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         user_id = update.effective_user.id
         username = update.effective_user.username
         text = update.message.text
+        
+        logger.info(f"🔘 Кнопка нажата: user_id={user_id}, текст='{text}'")
         
         if text == "📊 Статистика":
             if not is_admin(user_id):
@@ -470,13 +416,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
 • Материалы 18+
 • Слив личной информации
 
-<b>📝 Формат отправки:</b>
-1. Нажмите кнопку "📨 Отправить пост"
-2. Прикрепите 1-2 фотографии ИЛИ одно видео
-3. Добавьте текст к вложениям
-4. Отправьте и ожидайте
-
 <b>⏳ Модерация:</b>
+За несоблюдение правил - выдается бан в боте.
 Все предложения проверяются администраторами.
 Вы получите уведомление о результате.
 Все анонимно."""
@@ -488,13 +429,10 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
             
             post_instructions = """📨 <b>Отправка поста</b>
 
-<b>⚠️ Важно:</b>
-• Текст обязателен!
-• Фото без текста не принимаются
-• Видео без текста не принимаются
-• Только текст без медиа не принимается
-
-Отправьте 1-2 фото или видео с текстом 👇"""
+<b>📝 Формат отправки:</b>
+1. Прикрепите 1-2 фотографии ИЛИ одно видео
+2. Добавьте текст к вложениям
+3. Отправьте и ожидайте 👇"""
             
             await update.message.reply_text(post_instructions, parse_mode='HTML')
         
@@ -511,11 +449,38 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(chat_text, reply_markup=reply_markup, parse_mode='HTML')
+        
+        elif text == "🗑️ Запрос на удаление":
+            log_user_action(user_id, username, "delete_request_started")
+            
+            delete_request_text = """🗑️ <b>Запрос на удаление поста</b>
+
+<b>Как это работает:</b>
+Просто перешлите нужный пост из канала в чат с ботом.
+
+<b>⚠️ Внимание:</b>
+• Запросы проверяются администраторами
+• Злоупотребление функцией может привести к бану
+
+<b>‼️ ФУНКЦИЯ В БЕТА-ТЕСТЕ</b>
+
+Так как пока что функция тестится, могут быть баги.
+С случае обнаружения бага вы можете их сообщить в чате,
+предварительно отметив одного из модераторов.
+Также если что-то не получается, можете
+отправить пост скрин с постом из тгк и просьбой удалить."""
+            
+            await update.message.reply_text(delete_request_text, parse_mode='HTML')
+            await update.message.reply_text("📤 <b>Теперь отправьте пост из канала</b>\n\n"
+                                          "1. Откройте канал сущностей\n"
+                                          "2. Выберите нужный пост\n"
+                                          "3. Перешлите в чат с ботом",
+                                          parse_mode='HTML')
     
     except Exception as e:
         logger.error(f"Ошибка обработки кнопки клавиатуры: {e}")
 
-# ====== ФУНКЦИЯ ДОБАВЛЕНИЯ ССЫЛОК ======
+# ====== УПРОЩЕННАЯ ФУНКЦИЯ ДОБАВЛЕНИЯ ССЫЛОК ======
 def add_links_to_caption(caption):
     """Добавляет ссылки к подписи поста"""
     links_text = f"\n\n<a href='{PEREXODNIK_LINK}'>Переходник</a> | <a href='{PREDLOZHKA_LINK}'>Предложка</a> | <a href='{CHAT_LINK}'>Чат</a>"
@@ -532,18 +497,19 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = update.effective_user.id
         username = update.effective_user.username
         
-        # Проверяем, не в режиме ли рассылки
-        if context.user_data.get('waiting_broadcast'):
-            return
+        logger.info(f"handle_user_message: text={update.message.text}, caption={update.message.caption}")
         
         # Обработка медиа для предложений
         if update.message and (update.message.photo or update.message.video):
             await handle_media_message(update, context)
+            return
+            
         elif update.message and update.message.text:
             # Проверяем, не является ли это кнопкой клавиатуры
             text = update.message.text
-            if not (text.startswith("📊") or text.startswith("📋") or text.startswith("📨") or text.startswith("💬")):
-                # Если это не кнопка и не команда (не начинается с /) - это обычный текст
+            if not (text.startswith("📊") or text.startswith("📋") or text.startswith("📨") or 
+                   text.startswith("💬") or text.startswith("🗑️")):
+                # Если это не кнопка и не команда - это обычный текст
                 if not update.message.text.startswith('/'):
                     log_user_action(user_id, username, "text_only_rejection", "пользователь отправил только текст")
                     await update.message.reply_text("❌ Нужно отправить фотографии или видео с текстом.\n\nТолько текст не принимается.")
@@ -556,13 +522,15 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
         username = update.effective_user.username
         first_name = update.effective_user.first_name
         
+        logger.info(f"handle_media_message: обработка медиа для предложения, user_id={user_id}")
+        
         # Проверяем, не забанен ли пользователь
         if is_banned(user_id):
             log_user_action(user_id, username, "banned_user_tried_to_submit", "забаненный пользователь попытался отправить пост")
             
             ban_info = get_ban_info(user_id)
             if ban_info:
-                ban_id, _, _, _, reason, banned_by, banned_at = ban_info
+                _, _, _, _, reason, banned_by, banned_at = ban_info
                 await update.message.reply_text(
                     f"🚫 <b>Вы заблокированы!</b>\n\n"
                     f"Причина: {reason}\n"
@@ -665,18 +633,6 @@ async def process_media_group(context: ContextTypes.DEFAULT_TYPE, media_group_id
         
         group_data = media_groups[media_group_id]
         
-        # Проверяем, не забанен ли пользователь
-        if is_banned(group_data['user_id']):
-            try:
-                await context.bot.send_message(
-                    chat_id=group_data['user_id'],
-                    text="🚫 Вы заблокированы и не можете отправлять предложения."
-                )
-            except:
-                pass
-            del media_groups[media_group_id]
-            return
-        
         if len(group_data['photos']) < 1 or not group_data['caption']:
             del media_groups[media_group_id]
             return
@@ -727,7 +683,7 @@ async def process_media_group(context: ContextTypes.DEFAULT_TYPE, media_group_id
         del media_groups[media_group_id]
     except Exception as e:
         logger.error(f"Ошибка обработки медиагруппы: {e}")
-
+        
 async def forward_to_admins(context: ContextTypes.DEFAULT_TYPE, message, suggestion_id: int, username: str, first_name: str):
     try:
         admins = get_admins()
@@ -866,10 +822,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = query.from_user.username
         data = query.data
         
-        # Логируем нажатие кнопки для отладки
         logger.info(f"🔘 Кнопка нажата: user_id={user_id}, username={username}, data={data}")
         
-        # ВАЖНО: Обязательно отвечаем на callback_query перед обработкой
         await query.answer()
         
         if data.startswith('approve_'):
@@ -888,6 +842,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"Не удалось отредактировать сообщение: {e}")
                 return
             await reject_suggestion(query, context)
+        elif data.startswith('delete_post_'):
+            if not is_admin(user_id):
+                try:
+                    await query.edit_message_text("❌ Нет прав для удаления")
+                except Exception as e:
+                    logger.warning(f"Не удалось отредактировать сообщение: {e}")    
+                return
+            await delete_post_request(query, context)
         elif data == "show_bans_details":
             if not is_admin(user_id):
                 await query.answer("❌ Нет прав", show_alert=True)
@@ -898,89 +860,118 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("❌ Нет прав", show_alert=True)
                 return
             
-            # Показываем статистику
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT COUNT(*) FROM suggestions')
-            total = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "pending"')
-            pending = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "approved"')
-            approved = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "rejected"')
-            rejected = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM users WHERE role = "main_admin"')
-            main_admins = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM users WHERE role = "admin"')
-            admins = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM bans')
-            banned_count = cursor.fetchone()[0]
-            
-            conn.close()
-            
-            stats_text = f"""📊 <b>Статистика</b>
-
-📨 <b>Предложения:</b>
-• Всего: <code>{total}</code>
-• ⏳ Ожидают: <code>{pending}</code>
-• ✅ Опубликовано: <code>{approved}</code>
-• ❌ Отклонено: <code>{rejected}</code>
-
-👥 <b>Команда:</b>
-• 👑 Главные админы: <code>{main_admins}</code>
-• 🔧 Админы: <code>{admins}</code>
-
-🚫 <b>Заблокированные пользователи:</b>
-• Всего: <code>{banned_count}</code>"""
-            
-            keyboard = [[InlineKeyboardButton("📋 Детали банов", callback_data="show_bans_details")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            try:
-                await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='HTML')
-            except Exception as e:
-                logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            await show_statistics_callback(query, context)
         elif data == "add_admin":
             if not is_main_admin(user_id):
                 await query.answer("❌ Только главный админ может добавлять администраторов", show_alert=True)
                 return
-            
-            try:
-                await query.edit_message_text(
-                    "👤 <b>Добавление администратора</b>\n\n"
-                    "Введите ID пользователя, которого хотите назначить администратором.\n\n"
-                    "<b>Пример:</b>\n"
-                    "<code>123456789</code>\n\n"
-                    "Для отмены отправьте /cancel",
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось отредактировать сообщение: {e}")
-            
-            return WAITING_ADD_ADMIN
+            await query.edit_message_text(
+                "👤 <b>Добавление администратора</b>\n\n"
+                "Введите ID пользователя, которого хотите назначить администратором.\n\n"
+                "<b>Пример:</b>\n"
+                "<code>123456789</code>",
+                parse_mode='HTML'
+            )
+            context.user_data['waiting_admin_id'] = True
         elif data == "remove_admin":
             if not is_main_admin(user_id):
                 await query.answer("❌ Только главный админ может удалять администраторов", show_alert=True)
                 return
+            await query.edit_message_text(
+                "🗑️ <b>Удаление администратора</b>\n\n"
+                "Введите ID администратора, которого хотите удалить.\n\n"
+                "<b>Пример:</b>\n"
+                "<code>123456789</code>",
+                parse_mode='HTML'
+            )
+            context.user_data['waiting_remove_admin'] = True
+    except Exception as e:
+        logger.error(f"Ошибка обработки кнопки: {e}")
+
+async def delete_post_request(query, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает запрос на удаление поста"""
+    try:
+        delete_request_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+        username = query.from_user.username
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT channel_message_id 
+            FROM delete_requests 
+            WHERE id = ? AND status = "pending"
+        ''', (delete_request_id,))
+        
+        request_data = cursor.fetchone()
+        
+        if not request_data:
+            try:
+                await query.edit_message_text("❌ Запрос на удаление не найден или уже обработан")
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            conn.close()
+            return
+        
+        channel_message_id = request_data[0]
+        
+        try:
+            await context.bot.delete_message(
+                chat_id=CHANNEL_CHAT_ID,
+                message_id=channel_message_id
+            )
+            
+            cursor.execute('''
+                UPDATE delete_requests 
+                SET status = "approved", processed_by = ?
+                WHERE id = ?
+            ''', (user_id, delete_request_id))
+            
+            cursor.execute('''
+                UPDATE suggestions 
+                SET status = "deleted" 
+                WHERE channel_message_id = ?
+            ''', (channel_message_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            log_admin_action(user_id, username, "approved_delete_request", 
+                           details=f"delete_request_id={delete_request_id}, channel_msg_id={channel_message_id}")
             
             try:
                 await query.edit_message_text(
-                    "🗑️ <b>Удаление администратора</b>\n\n"
-                    "Введите ID администратора, которого хотите удалить.\n\n"
-                    "<b>Пример:</b>\n"
-                    "<code>123456789</code>\n\n"
-                    "Для отмены отправьте /cancel",
+                    f"✅ <b>Пост успешно удален из канала!</b>\n\n"
+                    f"🆔 ID запроса: <code>{delete_request_id}</code>\n"
+                    f"📝 ID в канале: <code>{channel_message_id}</code>",
                     parse_mode='HTML'
                 )
             except Exception as e:
                 logger.warning(f"Не удалось отредактировать сообщение: {e}")
             
-            return WAITING_REMOVE_ADMIN
+        except BadRequest as e:
+            error_msg = str(e).lower()
+            if "message to delete not found" in error_msg:
+                response = "❌ Сообщение уже удалено или не найдено"
+            elif "message can't be deleted" in error_msg:
+                response = "❌ Нет прав для удаления сообщений в канале"
+            else:
+                response = f"❌ Ошибка при удалении: {str(e)[:100]}"
+            
+            await query.edit_message_text(response)
+            log_admin_action(user_id, username, "delete_request_error", 
+                           details=f"delete_request_id={delete_request_id}, error: {str(e)}")
+            
+        except Exception as e:
+            await query.edit_message_text(f"❌ Произошла ошибка при удалении: {str(e)[:100]}")
+            log_admin_action(user_id, username, "delete_request_error", 
+                           details=f"delete_request_id={delete_request_id}, error: {str(e)}")
+        
+        conn.close()
+        
     except Exception as e:
-        logger.error(f"Ошибка обработки кнопки: {e}")
+        logger.error(f"Ошибка обработки запроса на удаление: {e}")
 
 async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1038,7 +1029,6 @@ async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
             video_id = suggestion[0]
             
             try:
-                # Добавляем ссылки к подписи
                 caption_with_links = add_links_to_caption(message_text)
                 sent_message = await context.bot.send_video(chat_id=CHANNEL_CHAT_ID, video=video_id, caption=caption_with_links, parse_mode='HTML')
                 channel_message_id = sent_message.message_id
@@ -1057,19 +1047,16 @@ async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(
                         f"✅ <b>Видео опубликовано в канале!</b>\n\n"
                         f"📋 ID предложения: <code>{suggestion_id}</code>\n"
-                        f"👤 Автор: <code>{author_info}</code>\n"
-                        f"📝 ID в канале: <code>{channel_message_id}</code>",
+                        f"👤 Автор: <code>{author_info}</code>",
                         parse_mode='HTML'
                     )
                 except Exception as e:
                     logger.warning(f"Не удалось отредактировать сообщение: {e}")
                 
-                # Уведомляем пользователя
                 try:
                     await context.bot.send_message(
                         chat_id=author_id,
-                        text=f"🎉 <b>Ваше предложение одобрено и опубликовано в канале!</b>\n\n"
-                             f"ID предложения: <code>{suggestion_id}</code>",
+                        text=f"🎉 <b>Ваше предложение одобрено и опубликовано в канале!</b>",
                         parse_mode='HTML'
                     )
                 except Exception as e:
@@ -1099,7 +1086,6 @@ async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 if file_id_2:
-                    # Добавляем ссылки к подписи для медиагруппы
                     caption_with_links = add_links_to_caption(message_text)
                     media_group = [
                         InputMediaPhoto(media=file_id, caption=caption_with_links, parse_mode='HTML'),
@@ -1108,7 +1094,6 @@ async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
                     sent_messages = await context.bot.send_media_group(chat_id=CHANNEL_CHAT_ID, media=media_group)
                     channel_message_id = sent_messages[0].message_id
                 else:
-                    # Добавляем ссылки к подписи для одиночного фото
                     caption_with_links = add_links_to_caption(message_text)
                     sent_message = await context.bot.send_photo(chat_id=CHANNEL_CHAT_ID, photo=file_id, caption=caption_with_links, parse_mode='HTML')
                     channel_message_id = sent_message.message_id
@@ -1127,19 +1112,16 @@ async def approve_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(
                         f"✅ <b>Предложение опубликовано в канале!</b>\n\n"
                         f"📋 ID предложения: <code>{suggestion_id}</code>\n"
-                        f"👤 Автор: <code>{author_info}</code>\n"
-                        f"📝 ID в канале: <code>{channel_message_id}</code>",
+                        f"👤 Автор: <code>{author_info}</code>",
                         parse_mode='HTML'
                     )
                 except Exception as e:
                     logger.warning(f"Не удалось отредактировать сообщение: {e}")
                 
-                # Уведомляем пользователя
                 try:
                     await context.bot.send_message(
                         chat_id=author_id,
-                        text=f"🎉 <b>Ваше предложение одобрено и опубликовано в канале!</b>\n\n"
-                             f"ID предложения: <code>{suggestion_id}</code>",
+                        text=f"🎉 <b>Ваше предложение одобрено и опубликовано в канале!</b>",
                         parse_mode='HTML'
                     )
                 except Exception as e:
@@ -1215,7 +1197,6 @@ async def reject_suggestion(query, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Не удалось отредактировать сообщение: {e}")
         
-        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 chat_id=author_id,
@@ -1245,7 +1226,6 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Статистика предложений
         cursor.execute('SELECT COUNT(*) FROM suggestions')
         total = cursor.fetchone()[0]
         cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "pending"')
@@ -1255,13 +1235,11 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "rejected"')
         rejected = cursor.fetchone()[0]
         
-        # Статистика команды
         cursor.execute('SELECT COUNT(*) FROM users WHERE role = "main_admin"')
         main_admins = cursor.fetchone()[0]
         cursor.execute('SELECT COUNT(*) FROM users WHERE role = "admin"')
         admins = cursor.fetchone()[0]
         
-        # Статистика банов
         cursor.execute('SELECT COUNT(*) FROM bans')
         banned_count = cursor.fetchone()[0]
         
@@ -1289,6 +1267,56 @@ async def show_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка команды stats: {e}")
 
+async def show_statistics_callback(query, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику для callback"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM suggestions')
+        total = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "pending"')
+        pending = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "approved"')
+        approved = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM suggestions WHERE status = "rejected"')
+        rejected = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE role = "main_admin"')
+        main_admins = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM users WHERE role = "admin"')
+        admins = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM bans')
+        banned_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        stats_text = f"""📊 <b>Статистика</b>
+
+📨 <b>Предложения:</b>
+• Всего: <code>{total}</code>
+• ⏳ Ожидают: <code>{pending}</code>
+• ✅ Опубликовано: <code>{approved}</code>
+• ❌ Отклонено: <code>{rejected}</code>
+
+👥 <b>Команда:</b>
+• 👑 Главные админы: <code>{main_admins}</code>
+• 🔧 Админы: <code>{admins}</code>
+
+🚫 <b>Заблокированные пользователи:</b>
+• Всего: <code>{banned_count}</code>"""
+        
+        keyboard = [[InlineKeyboardButton("📋 Детали банов", callback_data="show_bans_details")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await query.edit_message_text(stats_text, reply_markup=reply_markup, parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка показа статистики: {e}")
+
 async def show_bans_details(query, context: ContextTypes.DEFAULT_TYPE):
     """Показывает детальную информацию о банах"""
     try:
@@ -1311,7 +1339,6 @@ async def show_bans_details(query, context: ContextTypes.DEFAULT_TYPE):
                 
                 username_display = f"@{username_ban}" if username_ban else first_name
                 
-                # Получаем информацию о админе
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute('SELECT username FROM users WHERE user_id = ?', (banned_by,))
@@ -1375,16 +1402,16 @@ async def admins_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 users_text += f"├ ID: <code>{user_id_db}</code>\n"
                 username_display = f"@{username_db}" if username_db else "Без username"
                 users_text += f"├ {username_display}\n"
-                users_text += f"└ Дата: <code>{added_date[:10] if added_date else 'Неизвестно'}</code>\n\n"
+                users_text += f"└ Дата: <code>{added_date[:10]}</code>\n\n"
         
         if "admin" in roles_data:
             users_text += "🔧 <b>Администраторы:</b>\n\n"
-            for i, (user_id_db, username_db, added_date) in enumerate(roles_data["admin"], 1):
-                users_text += f"<b>{i}. Админ</b>\n"
+            for user_id_db, username_db, added_date in roles_data["admin"]:
+                users_text += "💎 <b>Админ</b>\n"
                 users_text += f"├ ID: <code>{user_id_db}</code>\n"
                 username_display = f"@{username_db}" if username_db else "Без username"
                 users_text += f"├ {username_display}\n"
-                users_text += f"└ Дата: <code>{added_date[:10] if added_date else 'Неизвестно'}</code>\n\n"
+                users_text += f"└ Дата: <code>{added_date[:10]}</code>\n\n"
         
         if is_main_admin(user_id):
             keyboard = [
@@ -1398,23 +1425,28 @@ async def admins_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка команды admins: {e}")
 
-async def handle_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает добавление администратора"""
+async def handle_add_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает добавление администратора из сообщения"""
     try:
         user_id = update.effective_user.id
         username = update.effective_user.username
         
         if not is_main_admin(user_id):
-            log_user_action(user_id, username, "tried_add_admin", "попытка добавить администратора")
-            await update.message.reply_text("❌ Нет прав")
-            return ConversationHandler.END
+            return
+        
+        if not context.user_data.get('waiting_admin_id'):
+            return
         
         text = update.message.text.strip()
         
         try:
             target_user_id = int(text)
             
-            # Проверяем, существует ли уже такой администратор
+            if target_user_id == user_id:
+                await update.message.reply_text("❌ Вы уже главный администратор")
+                context.user_data['waiting_admin_id'] = False
+                return
+            
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute('SELECT role FROM users WHERE user_id = ?', (target_user_id,))
@@ -1423,13 +1455,15 @@ async def handle_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if existing_user:
                 if existing_user[0] in ['admin', 'main_admin']:
                     await update.message.reply_text("❌ Этот пользователь уже является администратором")
-                    conn.close()
-                    return ConversationHandler.END
                 else:
-                    # Обновляем роль существующего пользователя
                     cursor.execute('UPDATE users SET role = "admin" WHERE user_id = ?', (target_user_id,))
+                    await update.message.reply_text(
+                        f"✅ <b>Администратор успешно добавлен!</b>\n\n"
+                        f"ID: <code>{target_user_id}</code>",
+                        parse_mode='HTML'
+                    )
+                    log_admin_action(user_id, username, "added_admin", target_user_id)
             else:
-                # Пытаемся получить информацию о пользователе
                 try:
                     user_info = await context.bot.get_chat(target_user_id)
                     target_username = user_info.username
@@ -1441,19 +1475,16 @@ async def handle_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 cursor.execute('INSERT INTO users (user_id, username, first_name, role) VALUES (?, ?, ?, ?)',
                              (target_user_id, target_username, first_name, 'admin'))
+                await update.message.reply_text(
+                    f"✅ <b>Администратор успешно добавлен!</b>\n\n"
+                    f"ID: <code>{target_user_id}</code>",
+                    parse_mode='HTML'
+                )
+                log_admin_action(user_id, username, "added_admin", target_user_id)
             
             conn.commit()
             conn.close()
             
-            log_admin_action(user_id, username, "added_admin", target_user_id)
-            
-            await update.message.reply_text(
-                f"✅ <b>Администратор успешно добавлен!</b>\n\n"
-                f"ID: <code>{target_user_id}</code>",
-                parse_mode='HTML'
-            )
-            
-            # Уведомляем нового администратора
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
@@ -1468,21 +1499,22 @@ async def handle_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ Неверный формат ID. ID должен быть числом.")
         
-        return ConversationHandler.END
+        context.user_data['waiting_admin_id'] = False
+        
     except Exception as e:
         logger.error(f"Ошибка добавления администратора: {e}")
-        return ConversationHandler.END
 
-async def handle_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает удаление администратора"""
+async def handle_remove_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает удаление администратора из сообщения"""
     try:
         user_id = update.effective_user.id
         username = update.effective_user.username
         
         if not is_main_admin(user_id):
-            log_user_action(user_id, username, "tried_remove_admin", "попытка удалить администратора")
-            await update.message.reply_text("❌ Нет прав")
-            return ConversationHandler.END
+            return
+        
+        if not context.user_data.get('waiting_remove_admin'):
+            return
         
         text = update.message.text.strip()
         
@@ -1491,7 +1523,8 @@ async def handle_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             if target_user_id == ADMIN_CHAT_ID:
                 await update.message.reply_text("❌ Нельзя удалить главного администратора")
-                return ConversationHandler.END
+                context.user_data['waiting_remove_admin'] = False
+                return
             
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1501,7 +1534,8 @@ async def handle_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not user_data:
                 await update.message.reply_text("❌ Администратор с таким ID не найден")
                 conn.close()
-                return ConversationHandler.END
+                context.user_data['waiting_remove_admin'] = False
+                return
             
             role, target_username, first_name = user_data
             cursor.execute('UPDATE users SET role = "user" WHERE user_id = ?', (target_user_id,))
@@ -1519,7 +1553,6 @@ async def handle_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode='HTML'
             )
             
-            # Уведомляем бывшего администратора
             try:
                 await context.bot.send_message(
                     chat_id=target_user_id,
@@ -1531,10 +1564,10 @@ async def handle_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE
         except ValueError:
             await update.message.reply_text("❌ Неверный формат ID. ID должен быть числом.")
         
-        return ConversationHandler.END
+        context.user_data['waiting_remove_admin'] = False
+        
     except Exception as e:
         logger.error(f"Ошибка удаления администратора: {e}")
-        return ConversationHandler.END
 
 # ====== КОМАНДА /BAN ======
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1567,17 +1600,14 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_user_id = int(context.args[0])
             reason = ' '.join(context.args[1:])
             
-            # Проверяем, не баним ли мы админа
             if is_admin(target_user_id):
                 await update.message.reply_text("❌ Нельзя заблокировать администратора")
                 return
             
-            # Проверяем, не забанен ли уже пользователь
             if is_banned(target_user_id):
                 await update.message.reply_text("❌ Этот пользователь уже заблокирован")
                 return
             
-            # Пытаемся получить информацию о пользователе
             try:
                 user_info = await context.bot.get_chat(target_user_id)
                 target_username = user_info.username
@@ -1587,25 +1617,23 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_username = None
                 first_name = "Пользователь"
             
-            # Баним пользователя
             if ban_user(target_user_id, target_username, first_name, reason, user_id):
                 log_ban_action(user_id, username, "banned_user", target_user_id, reason)
                 
                 username_display = f"@{target_username}" if target_username else first_name
                 
                 await update.message.reply_text(
-                    f"🚫 <b>Пользователь заблокирован!</b>\n\n"
+                    f"🚫 <b>Пользователь заблокирован навсегда!</b>\n\n"
                     f"ID: <code>{target_user_id}</code>\n"
                     f"Пользователь: {username_display}\n"
                     f"Причина: {reason}",
                     parse_mode='HTML'
                 )
                 
-                # Уведомляем пользователя о блокировке
                 try:
                     await context.bot.send_message(
                         chat_id=target_user_id,
-                        text=f"🚫 <b>Вы были заблокированы в боте!</b>\n\n"
+                        text=f"🚫 <b>Вы были заблокированы в боте навсегда!</b>\n\n"
                              f"Причина: {reason}\n"
                              f"Вы не можете отправлять новые предложения.\n\n"
                              f"По вопросам обращайтесь к администраторам.",
@@ -1651,16 +1679,13 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             target_user_id = int(context.args[0])
             
-            # Проверяем, забанен ли пользователь
             if not is_banned(target_user_id):
                 await update.message.reply_text("❌ Этот пользователь не заблокирован")
                 return
             
-            # Разбаниваем пользователя
             if unban_user(target_user_id):
                 log_ban_action(user_id, username, "unbanned_user", target_user_id)
                 
-                # Получаем информацию о пользователе
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute('SELECT username, first_name FROM users WHERE user_id = ?', (target_user_id,))
@@ -1680,7 +1705,6 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='HTML'
                 )
                 
-                # Уведомляем пользователя о разблокировке
                 try:
                     await context.bot.send_message(
                         chat_id=target_user_id,
@@ -1726,21 +1750,13 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if reply_msg.photo:
             caption = reply_msg.caption or ""
-            if "Предложение от" in caption:
-                cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text LIKE ?', (f"%{caption.split('Предложение от')[-1].strip()}%",))
-            else:
-                cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text = ?', (caption,))
+            cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text LIKE ?', (f"%{caption[:100]}%",))
         elif reply_msg.video:
             caption = reply_msg.caption or ""
-            cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text = ?', (caption,))
+            cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text LIKE ?', (f"%{caption[:100]}%",))
         else:
             text = reply_msg.text or ""
-            if "Одобрить предложение от" in text:
-                username_part = text.split("Одобрить предложение от")[-1].split("?")[0].strip()
-                cursor.execute('SELECT id, status, file_type FROM suggestions WHERE username = ? OR first_name = ?', 
-                              (username_part.replace('@', ''), username_part))
-            else:
-                cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text = ?', (text,))
+            cursor.execute('SELECT id, status, file_type FROM suggestions WHERE message_text LIKE ?', (f"%{text[:100]}%",))
         
         suggestion_data = cursor.fetchone()
         
@@ -1770,7 +1786,6 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text, video_id, author_id, author_username = suggestion
             
             try:
-                # Добавляем ссылки к подписи
                 caption_with_links = add_links_to_caption(message_text)
                 sent_message = await context.bot.send_video(chat_id=CHANNEL_CHAT_ID, video=video_id, caption=caption_with_links, parse_mode='HTML')
                 channel_message_id = sent_message.message_id
@@ -1783,7 +1798,6 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_admin_action(user_id, username, "hidden_approve_video_success", f"suggestion_id: {suggestion_id}")
                 await update.message.reply_text("✅ Видео опубликовано в канале через скрытую команду!")
                 
-                # Уведомляем пользователя
                 try:
                     await context.bot.send_message(
                         chat_id=author_id,
@@ -1812,7 +1826,6 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 if file_id_2:
-                    # Добавляем ссылки к подписи для медиагруппы
                     caption_with_links = add_links_to_caption(message_text)
                     media_group = [
                         InputMediaPhoto(media=file_id, caption=caption_with_links, parse_mode='HTML'),
@@ -1821,7 +1834,6 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sent_messages = await context.bot.send_media_group(chat_id=CHANNEL_CHAT_ID, media=media_group)
                     channel_message_id = sent_messages[0].message_id
                 else:
-                    # Добавляем ссылки к подписи для одиночного фото
                     caption_with_links = add_links_to_caption(message_text)
                     sent_message = await context.bot.send_photo(chat_id=CHANNEL_CHAT_ID, photo=file_id, caption=caption_with_links, parse_mode='HTML')
                     channel_message_id = sent_message.message_id
@@ -1834,7 +1846,6 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_admin_action(user_id, username, "hidden_approve_success", f"suggestion_id: {suggestion_id}")
                 await update.message.reply_text("✅ Предложение опубликовано в канале через скрытую команду!")
                 
-                # Уведомляем пользователя
                 try:
                     await context.bot.send_message(
                         chat_id=author_id,
@@ -1862,88 +1873,137 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = update.effective_user.username
         
         if not is_admin(user_id):
-            log_user_action(user_id, username, "tried_hidden_delete", "попытка использовать скрытую команду")
-            await update.message.reply_text("❌ У вас нет прав для использования этой команды")
+            await update.message.reply_text("❌ Нет прав для этой команды")
             return
         
         if not update.message.reply_to_message:
-            log_admin_action(user_id, username, "hidden_delete_no_reply", "команда без ответа на сообщение")
-            await update.message.reply_text("❌ Ответьте на сообщение с предложением для его удаления")
+            await update.message.reply_text("❌ Ответьте на сообщение с предложением")
             return
         
         reply_msg = update.message.reply_to_message
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        channel_message_id = None
+        suggestion_id = None
+        search_text = ""
         
-        if reply_msg.photo:
-            caption = reply_msg.caption or ""
-            if "Предложение от" in caption:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text LIKE ?', 
-                              (f"%{caption.split('Предложение от')[-1].strip()}%",))
-            else:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
-                              (caption,))
-        elif reply_msg.video:
-            caption = reply_msg.caption or ""
-            cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
-                          (caption,))
+        if hasattr(reply_msg, 'forward_from_chat') and reply_msg.forward_from_chat:
+            try:
+                forward_chat_id = str(reply_msg.forward_from_chat.id)
+                target_chat_id = CHANNEL_CHAT_ID
+                
+                if target_chat_id.startswith('-100'):
+                    target_chat_id = target_chat_id[4:]
+                elif target_chat_id.startswith('-'):
+                    target_chat_id = target_chat_id[1:]
+                
+                if str(forward_chat_id) == str(target_chat_id) or str(-100) + str(forward_chat_id) == CHANNEL_CHAT_ID:
+                    channel_message_id = reply_msg.forward_from_message_id
+                    logger.info(f"Определил через пересылку: channel_message_id={channel_message_id}")
+            except Exception as e:
+                logger.error(f"Ошибка проверки пересланного сообщения: {e}")
+        elif hasattr(reply_msg, 'forward_from_message_id') and reply_msg.forward_from_message_id:
+            channel_message_id = reply_msg.forward_from_message_id
+            logger.info(f"Использую forward_from_message_id: {channel_message_id}")
+        
+        if hasattr(reply_msg, 'caption') and reply_msg.caption:
+            search_text = reply_msg.caption
+        elif hasattr(reply_msg, 'text') and reply_msg.text:
+            search_text = reply_msg.text
+        
+        if search_text and not channel_message_id:
+            result = find_suggestion_by_text(search_text)
+            if result:
+                suggestion_id, db_channel_message_id, status = result
+                if db_channel_message_id:
+                    channel_message_id = db_channel_message_id
+                    logger.info(f"Нашел в базе: suggestion_id={suggestion_id}, channel_message_id={channel_message_id}")
+        
+        if suggestion_id and not channel_message_id:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('SELECT channel_message_id FROM suggestions WHERE id = ?', (suggestion_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    channel_message_id = row[0]
+                    logger.info(f"Получил из базы напрямую: channel_message_id={channel_message_id}")
+                conn.close()
+            except Exception as e:
+                logger.error(f"Ошибка запроса к базе: {e}")
+        
+        if channel_message_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=CHANNEL_CHAT_ID, 
+                    message_id=channel_message_id
+                )
+                
+                if suggestion_id:
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            'UPDATE suggestions SET status = ? WHERE id = ?', 
+                            ('deleted', suggestion_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                        logger.info(f"Обновлен статус в базе: suggestion_id={suggestion_id} -> deleted")
+                    except Exception as e:
+                        logger.error(f"Не удалось обновить статус: {e}")
+                
+                success_msg = f"✅ <b>Пост удален из канала!</b>\n\nID в канале: <code>{channel_message_id}</code>"
+                if suggestion_id:
+                    success_msg += f"\nID предложения: <code>{suggestion_id}</code>"
+                
+                await update.message.reply_text(success_msg, parse_mode='HTML')
+                log_admin_action(user_id, username, "delete_success", 
+                               details=f"channel_msg_id={channel_message_id}, suggestion_id={suggestion_id}")
+                
+            except BadRequest as e:
+                error_msg = str(e).lower()
+                if "message to delete not found" in error_msg:
+                    response = "❌ Сообщение уже удалено или не найдено"
+                elif "message can't be deleted" in error_msg:
+                    response = "❌ Нет прав для удаления сообщений в канале"
+                elif "chat not found" in error_msg:
+                    response = f"❌ Чат не найден. Проверьте CHANNEL_CHAT_ID в настройках бота."
+                else:
+                    response = f"❌ Ошибка при удалении: {str(e)[:200]}"
+                
+                await update.message.reply_text(response)
+                log_admin_action(user_id, username, "delete_error", details=str(e))
+                
+            except Exception as e:
+                await update.message.reply_text(f"❌ Произошла ошибка при удалении: {str(e)[:200]}")
+                log_admin_action(user_id, username, "delete_error", details=str(e))
+        
         else:
-            text = reply_msg.text or ""
-            if "Одобрить предложение от" in text:
-                username_part = text.split("Одобрить предложение от")[-1].split("?")[0].strip()
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE username = ? OR first_name = ?', 
-                              (username_part.replace('@', ''), username_part))
-            else:
-                cursor.execute('SELECT id, channel_message_id, status FROM suggestions WHERE message_text = ?', 
-                              (text,))
-        
-        suggestion_data = cursor.fetchone()
-        
-        if not suggestion_data:
-            log_admin_action(user_id, username, "hidden_delete_not_found", "предложение не найдено в базе")
-            await update.message.reply_text("❌ Не удалось найти предложение в базе данных")
-            conn.close()
-            return
-        
-        suggestion_id, channel_message_id, status = suggestion_data
-        
-        if status != 'approved':
-            log_admin_action(user_id, username, "hidden_delete_not_approved", f"suggestion_id: {suggestion_id}")
-            await update.message.reply_text("❌ Это предложение не было опубликовано в канале")
-            conn.close()
-            return
-        
-        if not channel_message_id:
-            await update.message.reply_text("❌ ID сообщения в канале не найден")
-            conn.close()
-            return
-        
-        try:
-            await context.bot.delete_message(chat_id=CHANNEL_CHAT_ID, message_id=channel_message_id)
-            
-            cursor.execute('UPDATE suggestions SET status = ? WHERE id = ?', ('deleted', suggestion_id))
-            conn.commit()
-            
-            log_admin_action(user_id, username, "hidden_delete_success", f"suggestion_id: {suggestion_id}")
-            await update.message.reply_text(
-                f"✅ <b>Пост удален с канала!</b>\n\n"
-                f"📋 ID предложения: <code>{suggestion_id}</code>\n"
-                f"🗑️ Статус изменен на: <code>deleted</code>\n"
-                f"📝 ID в канале: <code>{channel_message_id}</code>",
-                parse_mode='HTML'
+            response_text = (
+                "❌ <b>Не могу определить какой пост удалять</b>\n\n"
+                "<b>Как правильно использовать:</b>\n"
+                "1. Перешлите сообщение ИЗ КАНАЛА в этот чат\n"
+                "2. Ответьте командой /delete на пересланное сообщение\n\n"
+                "<b>ИЛИ</b>\n"
+                "1. Ответьте командой /delete на сообщение бота с предложением (то, что он вам отправил для модерации)\n\n"
+                "<b>Примечание:</b> Бот должен быть админом в канале с правом удаления сообщений."
             )
             
-        except Exception as e:
-            error_msg = f"❌ Ошибка удаления: {str(e)}"
-            log_admin_action(user_id, username, "hidden_delete_error", f"suggestion_id: {suggestion_id}, error: {str(e)}")
-            await update.message.reply_text(error_msg)
-        
-        conn.close()
+            if search_text:
+                response_text += f"\n\n<i>Поисковый текст: '{search_text[:100]}...'</i>"
+            
+            await update.message.reply_text(response_text, parse_mode='HTML')
+            log_admin_action(user_id, username, "delete_not_found", 
+                           details=f"search_text: '{search_text[:50]}...'")
+            
     except Exception as e:
         logger.error(f"Ошибка команды delete: {e}")
+        try:
+            await update.message.reply_text("❌ Произошла внутренняя ошибка при выполнении команды.")
+        except:
+            pass
 
-# ====== ФУНКЦИИ ДЛЯ РАССЫЛКИ ======
+# ====== КОМАНДА /BROADCAST ======
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начинает режим рассылки"""
     try:
@@ -1957,8 +2017,7 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         log_admin_action(user_id, username, "broadcast_started")
         
-        # Получаем количество пользователей
-        users_count = len(get_all_chat_users())
+        users_count = len(get_all_users())
         
         await update.message.reply_text(
             f"📢 <b>Режим рассылки</b>\n\n"
@@ -1989,15 +2048,13 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['waiting_broadcast'] = False
             return ConversationHandler.END
         
-        # Получаем всех пользователей
-        users = get_all_chat_users()
+        users = get_all_users()
         
         if not users:
             await update.message.reply_text("❌ Нет пользователей для рассылки")
             context.user_data['waiting_broadcast'] = False
             return ConversationHandler.END
         
-        # Убираем отправителя из рассылки
         users_to_send = [user for user in users if user != user_id]
         
         if not users_to_send:
@@ -2009,7 +2066,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fail_count = 0
         blocked_count = 0
         
-        # Отправляем статус
         status_msg = await update.message.reply_text(
             f"📢 <b>Начинаю рассылку...</b>\n\n"
             f"📊 <b>Статистика:</b>\n"
@@ -2019,7 +2075,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         
-        # Отправляем сообщение
         for i, user in enumerate(users_to_send):
             try:
                 if update.message.text:
@@ -2053,7 +2108,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     success_count += 1
                 
-                # Обновляем статус каждые 10 сообщений
                 if i % 10 == 0 and i > 0:
                     try:
                         await status_msg.edit_text(
@@ -2068,11 +2122,9 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                 
-                # Небольшая задержка
                 await asyncio.sleep(0.05)
                 
             except Forbidden:
-                # Пользователь заблокировал бота
                 blocked_count += 1
                 
             except BadRequest as e:
@@ -2091,7 +2143,6 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data['waiting_broadcast'] = False
         
-        # Финальный отчет
         await status_msg.edit_text(
             f"✅ <b>Рассылка завершена!</b>\n\n"
             f"📊 <b>Итоговая статистика:</b>\n"
@@ -2123,6 +2174,128 @@ async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка отмены рассылки: {e}")
         return ConversationHandler.END
 
+# ====== ОБРАБОТКА ЗАПРОСОВ НА УДАЛЕНИЕ ======
+async def handle_delete_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает пересланные сообщения для запроса на удаление"""
+    try:
+        user_id = update.effective_user.id
+        username = update.effective_user.username
+        first_name = update.effective_user.first_name
+        
+        if not update.message.forward_from_chat:
+            return
+        
+        chat_id = str(update.message.forward_from_chat.id)
+        target_chat_id = CHANNEL_CHAT_ID
+        
+        if target_chat_id.startswith('-100'):
+            target_chat_id = target_chat_id[4:]
+        elif target_chat_id.startswith('-'):
+            target_chat_id = target_chat_id[1:]
+        
+        if chat_id != target_chat_id and str(-100) + chat_id != CHANNEL_CHAT_ID:
+            return
+        
+        channel_message_id = update.message.forward_from_message_id
+        
+        search_text = ""
+        if update.message.caption:
+            search_text = update.message.caption
+        elif update.message.text:
+            search_text = update.message.text
+        
+        suggestion_id = None
+        if search_text:
+            result = find_suggestion_by_text(search_text)
+            if result:
+                suggestion_id = result[0]
+        
+        user_comment = ""
+        if update.message.text and len(update.message.text) > len(search_text):
+            user_comment = update.message.text.replace(search_text, "").strip()
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO delete_requests (user_id, username, first_name, channel_message_id, comment, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, channel_message_id, user_comment, 'pending'))
+        
+        delete_request_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        admins = get_admins()
+        username_display = f"@{username}" if username else first_name
+        
+        if suggestion_id:
+            cursor.execute('SELECT user_id, username FROM suggestions WHERE id = ?', (suggestion_id,))
+            suggestion_data = cursor.fetchone()
+            if suggestion_data:
+                author_id, author_username = suggestion_data
+                author_display = f"@{author_username}" if author_username else f"ID: {author_id}"
+            else:
+                author_display = "Неизвестно"
+        else:
+            author_display = "Неизвестно"
+        
+        keyboard = [[InlineKeyboardButton("🗑️ Удалить пост", callback_data=f"delete_post_{delete_request_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        request_text = f"🗑️ <b>Запрос на удаление поста</b>\n\n"
+        request_text += f"👤 <b>От пользователя:</b> {username_display}\n"
+        request_text += f"🆔 <b>ID пользователя:</b> <code>{user_id}</code>\n"
+        request_text += f"📝 <b>Автор поста:</b> {author_display}\n"
+        request_text += f"🆔 <b>ID поста в канале:</b> <code>{channel_message_id}</code>\n"
+        
+        if suggestion_id:
+            request_text += f"🆔 <b>ID предложения:</b> <code>{suggestion_id}</code>\n"
+        
+        request_text += f"🆔 <b>ID запроса:</b> <code>{delete_request_id}</code>\n"
+        
+        if user_comment:
+            request_text += f"💬 <b>Комментарий:</b> {user_comment}\n"
+        
+        request_sent = False
+        for admin in admins:
+            try:
+                if update.message.photo or update.message.video:
+                    await update.message.forward(chat_id=admin)
+                
+                await context.bot.send_message(
+                    chat_id=admin,
+                    text=request_text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+                request_sent = True
+                logger.info(f"Запрос на удаление отправлен админу {admin}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки админу {admin}: {e}")
+        
+        if not request_sent:
+            await update.message.reply_text("❌ Не удалось отправить запрос администраторам.")
+            return
+        
+        await update.message.reply_text(
+            "✅ <b>Ваш запрос на удаление отправлен администраторам!</b>\n\n"
+            "Мы рассмотрим ваш запрос в ближайшее время.",
+            parse_mode='HTML'
+        )
+        
+        reply_markup = get_main_keyboard(user_id)
+        await update.message.reply_text(
+            "Главное меню:",
+            reply_markup=reply_markup
+        )
+        
+        log_user_action(user_id, username, "sent_delete_request", 
+                       f"channel_msg_id={channel_message_id}, suggestion_id={suggestion_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки запроса на удаление: {e}")
+
 # ====== ОБРАБОТЧИК НЕИЗВЕСТНЫХ КОМАНД ======
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает неизвестные команды"""
@@ -2130,14 +2303,17 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         username = update.effective_user.username
         
-        # Получаем текст команды
         command_text = update.message.text
         
-        # Логируем попытку использовать неизвестную команду
-        log_user_action(user_id, username, "unknown_command", f"команда: {command_text}")
-        
-        # Для всех неизвестных команд
-        await update.message.reply_text("❌ Неизвестная команда. Используйте /start для начала работы.")
+        if command_text.startswith('/'):
+            log_user_action(user_id, username, "unknown_command", f"команда: {command_text}")
+            
+            if command_text in ['/stats', '/admins', '/approve', '/delete', '/ban', '/unban', '/broadcast']:
+                if not is_admin(user_id):
+                    await update.message.reply_text("❌ У вас нет прав для использования этой команды")
+                    return
+            
+            await update.message.reply_text("❌ Неизвестная команда. Используйте /start для начала работы.")
     except Exception as e:
         logger.error(f"Ошибка обработки неизвестной команды: {e}")
 
@@ -2153,7 +2329,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if isinstance(error, (NetworkError, TimedOut)):
             logger.warning(f"⚠️ Сетевая ошибка: {type(error).__name__}")
-            # Добавляем небольшую задержку при сетевых ошибках
             await asyncio.sleep(2)
             return
         
@@ -2171,67 +2346,41 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====== ЗАПУСК ======
 def main():
-    # Проверяем наличие других экземпляров (только для предупреждения)
-    has_other_instance = check_running_instances()
-    
-    import atexit
-    atexit.register(cleanup_lock_file)
+    """Главная функция запуска бота"""
+    print("🔄 Запуск бота...")
     
     try:
         init_db()
         
+        # Создаем Application
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Проверяем подключение
+        print("🔗 Проверка подключения к Telegram API...")
+        import asyncio
+        
+        async def check_connection():
+            try:
+                bot_info = await application.bot.get_me()
+                print(f"✅ Бот подключен: @{bot_info.username}")
+                return True
+            except Exception as e:
+                print(f"❌ Ошибка подключения: {e}")
+                return False
+        
+        # Запускаем проверку
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        connected = loop.run_until_complete(check_connection())
+        
+        if not connected:
+            print("❌ Не удалось подключиться к Telegram API")
+            return
+        
+        # Добавляем обработчики ошибок
         application.add_error_handler(error_handler)
         
-        # Conversation handler для рассылки
-        broadcast_handler = ConversationHandler(
-            entry_points=[CommandHandler("broadcast", broadcast_start)],
-            states={
-                WAITING_BROADCAST: [
-                    MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, broadcast_message),
-                    CommandHandler("cancel", broadcast_cancel)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_user=True,
-            per_chat=True
-        )
-        
-        # Conversation handler для добавления администратора
-        add_admin_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern='^add_admin$')],
-            states={
-                WAITING_ADD_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin),
-                    CommandHandler("cancel", broadcast_cancel)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_user=True,
-            per_chat=True
-        )
-        
-        # Conversation handler для удаления администратора
-        remove_admin_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_handler, pattern='^remove_admin$')],
-            states={
-                WAITING_REMOVE_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin),
-                    CommandHandler("cancel", broadcast_cancel)
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_user=True,
-            per_chat=True
-        )
-        
-        # ВАЖНО: Сначала добавляем ConversationHandler
-        application.add_handler(broadcast_handler)
-        application.add_handler(add_admin_handler)
-        application.add_handler(remove_admin_handler)
-        
-        # Команды - добавляем в правильном порядке
+        # Основные обработчики команд
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("stats", show_statistics))
         application.add_handler(CommandHandler("admins", admins_list))
@@ -2240,71 +2389,71 @@ def main():
         application.add_handler(CommandHandler("ban", ban_command))
         application.add_handler(CommandHandler("unban", unban_command))
         
-        # Обработчики кнопок клавиатуры - ДО других MessageHandler
-        application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|💬 Чат)$'), handle_keyboard_buttons))
+        # ConversationHandler для рассылки
+        broadcast_handler = ConversationHandler(
+            entry_points=[CommandHandler("broadcast", broadcast_start)],
+            states={
+                WAITING_BROADCAST: [
+                    MessageHandler(
+                        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+                        broadcast_message
+                    ),
+                    CommandHandler("cancel", broadcast_cancel)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", broadcast_cancel)]
+        )
+        application.add_handler(broadcast_handler)
         
-        # Обработчики медиа сообщений
-        application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_user_message))
+        # Обработчики кнопок клавиатуры
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|🗑️ Запрос на удаление|💬 Чат)$'),
+            handle_keyboard_buttons
+        ))
         
-        # Обработчики текстовых сообщений (не команд)
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
-        
-        # Обработчики кнопок (модерация и другие) - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ ИЗ CallbackQueryHandler
+        # Обработчики callback кнопок
         application.add_handler(CallbackQueryHandler(button_handler))
         
-        # Обработчик неизвестных команд - ДОЛЖЕН БЫТЬ САМЫМ ПОСЛЕДНИМ
+        # Обработчики добавления/удаления админов
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_add_admin_message
+        ))
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_remove_admin_message
+        ))
+        
+        # Обработчики медиа сообщений
+        application.add_handler(MessageHandler(
+            filters.PHOTO | filters.VIDEO, 
+            handle_user_message
+        ))
+        
+        # Обработчик запросов на удаление (пересланные сообщения)
+        application.add_handler(MessageHandler(
+            filters.FORWARDED,
+            handle_delete_request
+        ))
+        
+        # Обработчик текстовых сообщений
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            handle_user_message
+        ))
+        
+        # Обработчик неизвестных команд
         application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
         
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
-        if has_other_instance:
-            print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
-            print("   Это может вызвать конфликты при обработке сообщений!")
-        print("=" * 60)
-        print("🔧 ОСНОВНЫЕ ФУНКЦИИ:")
-        print("   ✅ Модерация предложений (фото/видео + текст)")
-        print("   ✅ Постоянное меню с кнопками в поле сообщения")
-        print("   ✅ Поддержка фото (1-2) и видео (1)")
-        print("   ✅ Правила публикации через кнопку")
-        print("   ✅ Чат канала через кнопку")
-        print("   ✅ Ссылки в постах: Переходник | Предложка | Чат")
-        print("   ✅ Система банов пользователей")
-        print("   ✅ Уведомления пользователям о результатах модерации")
-        print("   ✅ Управление администраторов (для главного админа)")
-        print("   ✅ Рассылка с исключением отправителя")
-        print("")
-        print("📝 МЕНЮ КОМАНД:")
-        print("   Для всех пользователей: только /start")
-        print("   Команды админов (вводятся вручную):")
-        print("   /stats - статистика")
-        print("   /admins - список команды")
-        print("   /approve - одобрить (ответ на сообщение)")
-        print("   /delete - удалить с канала (ответ на сообщение)")
-        print("   /ban - заблокировать пользователя")
-        print("   /unban - разблокировать пользователя")
-        print("   /broadcast - рассылка сообщений")
-        print("")
-        print("🔗 ССЫЛКИ В ПОСТАХ:")
-        print(f"   Переходник: {PEREXODNIK_LINK}")
-        print(f"   Предложка: {PREDLOZHKA_LINK}")
-        print(f"   Чат: {CHAT_LINK}")
-        print("")
-        print("🚫 СИСТЕМА БАНОВ:")
-        print("   /ban ID_пользователя причина - заблокировать")
-        print("   /unban ID_пользователя - разблокировать")
-        print("   Пользователи получают уведомления о бане/разбане")
-        print("   Статистика банов доступна в /stats")
-        print("")
-        print("👥 УПРАВЛЕНИЕ АДМИНАМИ (только главный админ):")
-        print("   Кнопки 'Добавить администратора' и 'Удалить администратора'")
-        print("   в списке команды (/admins)")
-        print("")
-        print("💡 Для остановки бота нажмите Ctrl+C")
+        print(f"🤖 Имя бота: @SushnostiNovikabot")
+        print(f"🤖 Admin ID: {ADMIN_CHAT_ID}")
         print("=" * 60)
         
+        # Запускаем polling
+        print("📡 Ожидаю сообщений...")
         application.run_polling(
-            poll_interval=1.0,
-            timeout=20,
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES
         )
@@ -2312,10 +2461,8 @@ def main():
     except KeyboardInterrupt:
         print("\n\n✅ Бот остановлен пользователем (Ctrl+C)")
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        logger.error(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         print(f"❌ Бот остановлен из-за ошибки: {e}")
-    finally:
-        cleanup_lock_file()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
