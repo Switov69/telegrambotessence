@@ -73,17 +73,18 @@ def cleanup_lock_file():
 # ====== НАСТРОЙКА ЛОГИРОВАНИЯ ======
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG,  # Измените на DEBUG для более подробных логов
 )
 logger = logging.getLogger(__name__)
 
 # Включаем DEBUG для telegram.ext чтобы видеть все события
-logging.getLogger("telegram.ext").setLevel(logging.INFO)
-logging.getLogger("telegram").setLevel(logging.INFO)
+logging.getLogger("telegram.ext").setLevel(logging.DEBUG)
+logging.getLogger("telegram").setLevel(logging.DEBUG)
 
 # Убираем лишние логи
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # ====== ФУНКЦИИ ЛОГИРОВАНИЯ ======
 def log_user_action(user_id: int, username: str, action: str, details: str = ""):
@@ -3283,44 +3284,9 @@ def main():
         if expired_count > 0:
             logger.info(f"При запуске удалено {expired_count} истекших временных банов")
         
-        # ТЕСТОВАЯ ПРОВЕРКА ПОДКЛЮЧЕНИЯ (синхронная)
-        try:
-            bot_info = application.bot.get_me()
-            logger.info(f"✅ Бот подключен к Telegram API: @{bot_info.username}")
-            print(f"✅ Бот подключен: @{bot_info.username}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к Telegram API: {e}")
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Telegram API")
-            print(f"Причина: {e}")
-            return
-        
-        # Периодическая проверка банов (если JobQueue доступен)
-        if hasattr(application, 'job_queue') and application.job_queue is not None:
-            from telegram.ext import JobQueue
-            
-            def check_bans_periodically(context):
-                """Периодически проверяет истекшие баны"""
-                try:
-                    expired_count = check_expired_bans()
-                    if expired_count > 0:
-                        logger.info(f"Проверка банов: удалено {expired_count} истекших временных банов")
-                    
-                    # Получаем application из context
-                    if context and context.application:
-                        sent_count, failed_count = send_pending_unban_notifications(context.application)
-                        if sent_count > 0:
-                            logger.info(f"Проверка банов: отправлено {sent_count} уведомлений о разбане")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка в периодической проверке банов: {e}")
-            
-            # Используем run_repeating правильно
-            application.job_queue.run_repeating(
-                callback=check_bans_periodically,
-                interval=300,
-                first=10
-            )
-            logger.info("✅ JobQueue настроен для периодической проверки банов")
+        # Простая проверка подключения - просто попытка создать бота
+        logger.info(f"Запуск бота с токеном: {BOT_TOKEN[:10]}...")
+        print("🤖 Запускаю бота...")
         
         application.add_error_handler(error_handler)
         
@@ -3409,19 +3375,20 @@ def main():
         print("🤖 Бот запущен и готов к работе!")
         print(f"🤖 Token: {BOT_TOKEN[:10]}...")
         print(f"🤖 Admin ID: {ADMIN_CHAT_ID}")
-        print(f"🤖 Имя бота: @{bot_info.username}")
         if has_other_instance:
             print("⚠️  ПРЕДУПРЕЖДЕНИЕ: Возможно есть другие запущенные экземпляры")
         print("=" * 60)
-        print("📝 Ожидаю сообщений...")
         
-        # Запускаем бота
+        # Запускаем бота с подробными логами
         logger.info("🔄 Запуск polling...")
         
-        # Простой запуск polling
+        # Устанавливаем более высокий timeout и включим все обновления
         application.run_polling(
+            poll_interval=0.5,  # Более частое опрос
+            timeout=30,
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False
         )
         
     except KeyboardInterrupt:
@@ -3431,6 +3398,3 @@ def main():
         print(f"❌ Бот остановлен из-за ошибки: {e}")
     finally:
         cleanup_lock_file()
-
-if __name__ == "__main__":
-    main()
