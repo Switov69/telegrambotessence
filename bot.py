@@ -12,7 +12,7 @@ from datetime import datetime
 
 # ====== НАСТРОЙКИ ======
 BOT_TOKEN = "8418277065:AAHeHD9ikbkJ1xMq_EOD-dbf2LMnEb7yAyA"
-ADMIN_CHAT_ID = 8069781607  # Ваш chat_id
+ADMIN_CHAT_ID = 1746547600  # Ваш chat_id
 CHANNEL_CHAT_ID = "-1002556198303"  # ID вашего канала
 CHAT_LINK = "https://t.me/+1Es8MH54mf0wNzVi"  # Ссылка на чат
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"  # Ссылка на переходник
@@ -279,7 +279,7 @@ def get_all_chat_users():
         for row in cursor.fetchall():
             all_users.add(row[0])
         
-        # 2. Из таблицы suggestions
+        # 2. Из таблицу suggestions
         cursor.execute('SELECT DISTINCT user_id FROM suggestions WHERE user_id IS NOT NULL AND user_id > 0')
         for row in cursor.fetchall():
             all_users.add(row[0])
@@ -947,25 +947,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not is_main_admin(user_id):
                 await query.answer("❌ Только главный админ может добавлять администраторов", show_alert=True)
                 return
-            await query.edit_message_text(
-                "👤 <b>Добавление администратора</b>\n\n"
-                "Введите ID пользователя, которого хотите назначить администратором.\n\n"
-                "<b>Пример:</b>\n"
-                "<code>123456789</code>",
-                parse_mode='HTML'
-            )
+            
+            try:
+                await query.edit_message_text(
+                    "👤 <b>Добавление администратора</b>\n\n"
+                    "Введите ID пользователя, которого хотите назначить администратором.\n\n"
+                    "<b>Пример:</b>\n"
+                    "<code>123456789</code>\n\n"
+                    "Для отмены отправьте /cancel",
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            
             return WAITING_ADD_ADMIN
         elif data == "remove_admin":
             if not is_main_admin(user_id):
                 await query.answer("❌ Только главный админ может удалять администраторов", show_alert=True)
                 return
-            await query.edit_message_text(
-                "🗑️ <b>Удаление администратора</b>\n\n"
-                "Введите ID администратора, которого хотите удалить.\n\n"
-                "<b>Пример:</b>\n"
-                "<code>123456789</code>",
-                parse_mode='HTML'
-            )
+            
+            try:
+                await query.edit_message_text(
+                    "🗑️ <b>Удаление администратора</b>\n\n"
+                    "Введите ID администратора, которого хотите удалить.\n\n"
+                    "<b>Пример:</b>\n"
+                    "<code>123456789</code>\n\n"
+                    "Для отмены отправьте /cancel",
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение: {e}")
+            
             return WAITING_REMOVE_ADMIN
     except Exception as e:
         logger.error(f"Ошибка обработки кнопки: {e}")
@@ -2121,24 +2133,11 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем текст команды
         command_text = update.message.text
         
-        # Проверяем, является ли это командой
-        if command_text.startswith('/'):
-            # Логируем попытку использовать неизвестную команду
-            log_user_action(user_id, username, "unknown_command", f"команда: {command_text}")
-            
-            # Проверяем, является ли это админской командой
-            if command_text in ['/stats', '/admins', '/approve', '/delete', '/ban', '/unban', '/broadcast']:
-                # Если пользователь не админ, сообщаем об отсутствии прав
-                if not is_admin(user_id):
-                    await update.message.reply_text("❌ У вас нет прав для использования этой команды")
-                    return
-                else:
-                    # Админ пытается использовать команду, которая должна быть в меню
-                    # Просто пропускаем - команда уже обрабатывается в своих обработчиках
-                    return
-            
-            # Для всех остальных неизвестных команд
-            await update.message.reply_text("❌ Неизвестная команда. Используйте /start для начала работы.")
+        # Логируем попытку использовать неизвестную команду
+        log_user_action(user_id, username, "unknown_command", f"команда: {command_text}")
+        
+        # Для всех неизвестных команд
+        await update.message.reply_text("❌ Неизвестная команда. Используйте /start для начала работы.")
     except Exception as e:
         logger.error(f"Ошибка обработки неизвестной команды: {e}")
 
@@ -2195,7 +2194,8 @@ def main():
                 ]
             },
             fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
+            per_user=True,
+            per_chat=True
         )
         
         # Conversation handler для добавления администратора
@@ -2203,11 +2203,13 @@ def main():
             entry_points=[CallbackQueryHandler(button_handler, pattern='^add_admin$')],
             states={
                 WAITING_ADD_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_admin),
+                    CommandHandler("cancel", broadcast_cancel)
                 ]
             },
             fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
+            per_user=True,
+            per_chat=True
         )
         
         # Conversation handler для удаления администратора
@@ -2215,18 +2217,21 @@ def main():
             entry_points=[CallbackQueryHandler(button_handler, pattern='^remove_admin$')],
             states={
                 WAITING_REMOVE_ADMIN: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_admin),
+                    CommandHandler("cancel", broadcast_cancel)
                 ]
             },
             fallbacks=[CommandHandler("cancel", broadcast_cancel)],
-            per_message=False
+            per_user=True,
+            per_chat=True
         )
         
+        # ВАЖНО: Сначала добавляем ConversationHandler
         application.add_handler(broadcast_handler)
         application.add_handler(add_admin_handler)
         application.add_handler(remove_admin_handler)
         
-        # Команды
+        # Команды - добавляем в правильном порядке
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("stats", show_statistics))
         application.add_handler(CommandHandler("admins", admins_list))
@@ -2235,10 +2240,7 @@ def main():
         application.add_handler(CommandHandler("ban", ban_command))
         application.add_handler(CommandHandler("unban", unban_command))
         
-        # Обработчик неизвестных команд (должен быть ПОСЛЕ всех известных команд)
-        application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
-        
-        # Обработчики кнопок клавиатуры
+        # Обработчики кнопок клавиатуры - ДО других MessageHandler
         application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|💬 Чат)$'), handle_keyboard_buttons))
         
         # Обработчики медиа сообщений
@@ -2247,8 +2249,11 @@ def main():
         # Обработчики текстовых сообщений (не команд)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
         
-        # Обработчики кнопок (модерация и другие)
+        # Обработчики кнопок (модерация и другие) - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ ИЗ CallbackQueryHandler
         application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Обработчик неизвестных команд - ДОЛЖЕН БЫТЬ САМЫМ ПОСЛЕДНИМ
+        application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
         
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
