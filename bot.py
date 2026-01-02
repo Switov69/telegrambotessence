@@ -11,8 +11,8 @@ from telegram.error import NetworkError, TimedOut, BadRequest, Forbidden, Confli
 from datetime import datetime
 
 # ====== НАСТРОЙКИ ======
-BOT_TOKEN = "8229923788:AAFejCcCDAGLNRsmvtr9jpGdNZDtiiFtax4"
-ADMIN_CHAT_ID = 8069781607  # Ваш chat_id
+BOT_TOKEN = "8418277065:AAHsRqkGYoqZH2gI68yKRNe-Dp731Qxs4Js"
+ADMIN_CHAT_ID = 1746547600  # Ваш chat_id
 CHANNEL_CHAT_ID = "-1002556198303"  # ID вашего канала
 CHAT_LINK = "https://t.me/+1Es8MH54mf0wNzVi"  # Ссылка на чат
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"  # Ссылка на переходник
@@ -2347,4 +2347,5 @@ def main():
         cleanup_lock_file()
 
 if __name__ == '__main__':
+
     main()
