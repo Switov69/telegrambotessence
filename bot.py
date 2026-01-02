@@ -1162,10 +1162,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = update.effective_user.id
         username = update.effective_user.username
         
-        logger.info(f"handle_user_message: text={update.message.text}, caption={update.message.caption}, waiting_delete_request={context.user_data.get('waiting_delete_request', False)}")
+        logger.info(f"handle_user_message вызвана для user_id={user_id}")
         
         # Проверяем, не в режиме ли рассылки
         if context.user_data.get('waiting_broadcast'):
+            logger.info("Пользователь в режиме рассылки, пропускаем")
             return
         
         # Проверяем, не в режиме ли запроса на удаление
@@ -1175,19 +1176,29 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         
         # Обработка медиа для предложений
-        if update.message and (update.message.photo or update.message.video):
+        if update.message.photo or update.message.video:
+            logger.info(f"Получено медиа сообщение от {user_id}")
             await handle_media_message(update, context)
             return
             
-        elif update.message and update.message.text:
-            # Проверяем, не является ли это кнопкой клавиатуры
+        elif update.message.text:
             text = update.message.text
-            if not (text.startswith("📊") or text.startswith("📋") or text.startswith("📨") or 
-                   text.startswith("💬") or text.startswith("🗑️")):
-                # Если это не кнопка и не команда (не начинается с /) - это обычный текст
-                if not update.message.text.startswith('/'):
-                    log_user_action(user_id, username, "text_only_rejection", "пользователь отправил только текст")
-                    await update.message.reply_text("❌ Нужно отправить фотографии или видео с текстом.\n\nТолько текст не принимается.")
+            logger.info(f"Получен текст от {user_id}: {text}")
+            
+            # Проверяем, является ли это кнопкой клавиатуры (этот случай уже обработан ранее)
+            if text in ["📊 Статистика", "📋 Правила", "📨 Отправить пост", "🗑️ Запрос на удаление", "💬 Чат"]:
+                logger.info(f"Текст уже обработан как кнопка клавиатуры: {text}")
+                return
+            
+            # Проверяем, не является ли это командой (команды уже обработаны ранее)
+            if text.startswith('/'):
+                logger.info(f"Команда уже обработана: {text}")
+                return
+            
+            # Если это обычный текст (не кнопка и не команда)
+            log_user_action(user_id, username, "text_only_rejection", "пользователь отправил только текст")
+            await update.message.reply_text("❌ Нужно отправить фотографии или видео с текстом.\n\nТолько текст не принимается.")
+            
     except Exception as e:
         logger.error(f"Ошибка обработки сообщения: {e}")
 
@@ -3343,11 +3354,7 @@ def main():
             per_message=False
         )
         
-        application.add_handler(broadcast_handler)
-        application.add_handler(add_admin_handler)
-        application.add_handler(remove_admin_handler)
-        
-        # Команды
+        # КОМАНДЫ - добавляем первыми
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("stats", show_statistics))
         application.add_handler(CommandHandler("admins", admins_list))
@@ -3359,18 +3366,29 @@ def main():
         application.add_handler(CommandHandler("untempban", untempban_command))
         application.add_handler(CommandHandler("tempbans", tempbans_command))
         
-        # Обработчик неизвестных команд (должен быть ПОСЛЕ всех известных команд)
+        # Обработчики кнопок клавиатуры - ДО других текстовых хендлеров
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|🗑️ Запрос на удаление|💬 Чат)$'),
+            handle_keyboard_buttons
+        ))
+        
+        # Conversation handlers - добавляем после команд
+        application.add_handler(broadcast_handler)
+        application.add_handler(add_admin_handler)
+        application.add_handler(remove_admin_handler)
+        
+        # Обработчик кнопок (модерация и другие)
+        application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Обработчик неизвестных команд - перед общими текстовыми хендлерами
         application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
         
-        # Обработчики кнопок клавиатуры
-        application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^(📊 Статистика|📋 Правила|📨 Отправить пост|🗑️ Запрос на удаление|💬 Чат)$'), handle_keyboard_buttons))
-        
-        # Обработчики медиа и текстовых сообщений
-        # Важно: этот обработчик должен быть после обработчиков кнопок
-        application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.TEXT, handle_user_message))
-        
-        # Обработчики кнопок (модерация и другие)
-        application.add_handler(CallbackQueryHandler(button_handler))
+        # Обработчики медиа и текстовых сообщений - ПОСЛЕДНИМИ
+        # Используем filters.ALL и фильтруем внутри handle_user_message
+        application.add_handler(MessageHandler(
+            filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+            handle_user_message
+        ))
         
         print("=" * 60)
         print("🤖 Бот запущен и готов к работе!")
@@ -3417,6 +3435,3 @@ def main():
         print(f"❌ Бот остановлен из-за ошибки: {e}")
     finally:
         cleanup_lock_file()
-
-if __name__ == '__main__':
-    main()
