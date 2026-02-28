@@ -21,9 +21,9 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "8407380994:AAGCg5GCEhVnMvurZg5Rrfuol0NxDffif2E"
+BOT_TOKEN = "8226412988:AAHokGE_pv-Ou2O5RddrasZeKPWO7xTFzsI"
 OWNER_ID = 1746547600  # Главный админ
-CHANNEL_ID = -1003401999609  # ID канала
+CHANNEL_ID = -1002556198303  # ID канала
 CHAT_LINK = "https://t.me/+1Es8MH54mf0wNzVi"  # Ссылка на чат
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"
 PREDLOZHKA_LINK = "https://t.me/SushnostiNovikabot"
