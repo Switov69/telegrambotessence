@@ -1,3 +1,4 @@
+import os
 import logging
 import sqlite3
 import asyncio
@@ -22,8 +23,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiohttp import web
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "8226412988:AAHokGE_pv-Ou2O5RddrasZeKPWO7xTFzsI"
-OWNER_ID = 1746547600
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 CHANNEL_ID = -1002556198303
 CHAT_LINK = "https://t.me/+MbQ0l7cDFzFmM2Yy"
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"
