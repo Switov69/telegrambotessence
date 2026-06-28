@@ -19,12 +19,13 @@ from aiogram.types import (
     InputMediaVideo
 )
 from aiogram.exceptions import TelegramBadRequest
+from aiohttp import web
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8226412988:AAHokGE_pv-Ou2O5RddrasZeKPWO7xTFzsI"
-OWNER_ID = 1746547600  # Главный админ
-CHANNEL_ID = -1002556198303  # ID канала
-CHAT_LINK = "https://t.me/+6By2SsdmntM0Y2Ni"  # Ссылка на чат
+OWNER_ID = 1746547600
+CHANNEL_ID = -1002556198303
+CHAT_LINK = "https://t.me/+MbQ0l7cDFzFmM2Yy"
 PEREXODNIK_LINK = "https://t.me/sushnostinovika111"
 PREDLOZHKA_LINK = "https://t.me/SushnostiNovikabot"
 
@@ -660,9 +661,29 @@ async def process_callbacks(callback: CallbackQuery):
             await callback.answer(f"Не удалось удалить: {e}", show_alert=False)
     else:
         await callback.answer()
+        
+# --- САЙТ ДЛЯ ПИНГА ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running smoothly!", status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Порт 10000 часто используется по умолчанию на Render, 
+    # но лучше брать его из переменных окружения хостинга
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"веб-сервер запущен на порту {port}")
 
 async def main():
     print("--- БОТ ЗАПУЩЕН (aiogram 3.x) ---")
+    asyncio.create_task(start_web_server())
     try: await dp.start_polling(bot, skip_updates=True)
     finally: await bot.session.close()
 
